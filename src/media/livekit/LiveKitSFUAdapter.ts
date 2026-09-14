@@ -8,6 +8,7 @@ import {
   CameraPublishOptions,
   AudioOutputRoute,
 } from '../../types/media';
+import { getServerMemberDisplayName, pbService } from '../../pocketbase';
 import liveKitManager from './LiveKitManager';
 
 export const LIVEKIT_DEFAULT_URL = liveKitManager['sfuUrl'];
@@ -28,6 +29,16 @@ export class LiveKitSFUAdapter implements SFUProviderAdapter {
 
   public async requestToken(identity: string, name: string, roomName: string): Promise<string> {
     return liveKitManager.getToken(identity, name, roomName);
+  }
+
+  public async preflightRoom(roomConfig: RoomConfig): Promise<void> {
+    const roomName = liveKitManager.getRoomName(roomConfig);
+    const member = roomConfig.serverId ? pbService.getCachedServerMember(roomConfig.serverId, roomConfig.user.id) : null;
+    const displayName =
+      getServerMemberDisplayName(member, roomConfig.user, roomConfig.serverId) ||
+      roomConfig.user.display_name ||
+      roomConfig.user.username;
+    await liveKitManager.getToken(roomConfig.user.id, displayName, roomName);
   }
 
   public async joinSession(roomConfig: RoomConfig): Promise<void> {

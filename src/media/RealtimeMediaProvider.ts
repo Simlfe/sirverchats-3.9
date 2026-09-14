@@ -21,6 +21,7 @@ import { audioMixer } from '../services/audioMixer';
 export interface IRealtimeMediaProvider {
   connect(): Promise<void>;
   disconnect(): Promise<void>;
+  preflightRoom(config: RoomConfig): Promise<void>;
   joinRoom(config: RoomConfig): Promise<MediaParticipant[]>;
   leaveRoom(): Promise<void>;
   enableMicrophone(): Promise<MediaStreamTrack | null>;
@@ -78,6 +79,10 @@ export class RealtimeMediaProvider implements IRealtimeMediaProvider {
   private sfuAdapter: SFUProviderAdapter | null = null;
   private sfuConfig: SFUServerConfig | null = null;
   private sfuAdapterUnsubscribe: (() => void) | null = null;
+  // React can request the same room from the accepted signal and the voice
+  // panel at once. Share one promise so neither caller reports a connection
+  // before LiveKit has actually finished negotiating.
+  private joinInFlight: { roomId: string; promise: Promise<MediaParticipant[]> } | null = null;
 
   // Local per-user volume map (userId -> volume 0..100)
   private participantVolumes: Map<string, number> = new Map();
@@ -322,7 +327,35 @@ export class RealtimeMediaProvider implements IRealtimeMediaProvider {
     this.setConnectionState('disconnected');
   }
 
+  public async preflightRoom(config: RoomConfig): Promise<void> {
+    const adapter = this.sfuAdapter;
+    if (!adapter || typeof adapter.preflightRoom !== 'function') return;
+    await adapter.preflightRoom(config);
+  }
+
   public async joinRoom(config: RoomConfig): Promise<MediaParticipant[]> {
+    const inFlight = this.joinInFlight;
+    if (inFlight) {
+      if (inFlight.roomId === config.roomId) {
+        return inFlight.promise;
+      }
+      // Wait for a previous room switch to settle before tearing down its
+      // LiveKit session.
+      await inFlight.promise.catch(() => {});
+    }
+
+    const operation = this.joinRoomInternal(config);
+    this.joinInFlight = { roomId: config.roomId, promise: operation };
+    try {
+      return await operation;
+    } finally {
+      if (this.joinInFlight?.promise === operation) {
+        this.joinInFlight = null;
+      }
+    }
+  }
+
+  private async joinRoomInternal(config: RoomConfig): Promise<MediaParticipant[]> {
     // 1. Prevent duplicate room connections or concurrent join attempts
     if (this.activeRoom && this.activeRoom.roomId === config.roomId && this.connectionState === 'connected') {
       return this.getParticipants();
@@ -395,6 +428,10 @@ export class RealtimeMediaProvider implements IRealtimeMediaProvider {
     if (this.sfuAdapter) {
       try {
         await this.sfuAdapter.joinSession(config);
+        const adapterState = this.sfuAdapter.getConnectionState();
+        if (adapterState !== 'connected') {
+          throw new Error(`Media server did not reach a connected state (${adapterState})`);
+        }
       } catch (err: any) {
         console.error('[SFU_SUBSYSTEM] SFU session join failed:', err?.message || err);
         await this.sfuAdapter.leaveSession().catch(() => {});

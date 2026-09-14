@@ -98,7 +98,13 @@ function VoicePanel({
     activeRoom.roomId === channel.id &&
     connectionState === 'connected';
 
-  const isConnectingToThisChannel = !isConnectedToThisChannel;
+  // Only show the negotiating screen while this channel actually owns an
+  // in-flight/reconnecting room. The previous `!isConnected` check rendered
+  // a permanent "Connecting to Voice" screen even after a failed join.
+  const isConnectingToThisChannel =
+    activeRoom !== null &&
+    activeRoom.roomId === channel.id &&
+    (connectionState === 'joining' || connectionState === 'connecting' || connectionState === 'reconnecting');
 
   const isConnectedToOtherChannel =
     activeRoom !== null &&

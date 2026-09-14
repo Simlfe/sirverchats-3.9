@@ -212,6 +212,8 @@ export interface SFUProviderAdapter {
   id: string;
   name: string;
   configure(config: SFUServerConfig): Promise<void>;
+  /** Validate token/session availability before an invite is sent. */
+  preflightRoom?(roomConfig: RoomConfig): Promise<void>;
   joinSession(roomConfig: RoomConfig): Promise<void>;
   leaveSession(): Promise<void>;
   publishAudioTrack(track: MediaStreamTrack): Promise<void>;

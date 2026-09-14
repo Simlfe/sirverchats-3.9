@@ -406,7 +406,7 @@ export class LiveKitManager {
 
       // A terminally disconnected Room cannot be connected again reliably;
       // create a fresh instance while preserving the requested room config.
-      if (this.room && this.currentRoomConfig?.roomId === roomConfig.roomId && this.room.state === LiveKitConnectionState.Disconnected) {
+      if (this.room && this.room.state === LiveKitConnectionState.Disconnected) {
         try {
           this.room.removeAllListeners();
           await this.room.disconnect(true);
@@ -513,6 +513,10 @@ export class LiveKitManager {
               this.currentRoomConfig = null;
               this.setConnectionState('disconnected');
             }
+            // An aborted initial join is a failed attempt, not a successful
+            // background connection. Propagate it so the provider can clean
+            // up its optimistic participant and the caller can avoid ringing.
+            throw new Error('LiveKit connection attempt was cancelled');
           }
           return;
         }

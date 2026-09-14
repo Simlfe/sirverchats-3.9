@@ -165,6 +165,38 @@ class WebSocketService {
     }
   }
 
+  /** True only when a server WebSocket is ready to deliver an event to the
+   * other user. Local BroadcastChannel delivery is intentionally not counted:
+   * it cannot make a cross-device call ring. */
+  public isConnected(): boolean {
+    return typeof WebSocket !== 'undefined' && this.ws?.readyState === WebSocket.OPEN;
+  }
+
+  /** Wait briefly for the reconnect loop before declaring a signalling
+   * operation unavailable. Nothing is queued: a timeout returns false and
+   * the caller can show a retryable error instead of ringing nobody. */
+  public async waitForConnection(timeoutMs: number = 3000): Promise<boolean> {
+    if (this.isConnected()) return true;
+    this.connect();
+    if (timeoutMs <= 0) return this.isConnected();
+
+    return new Promise((resolve) => {
+      const startedAt = Date.now();
+      const check = () => {
+        if (this.isConnected()) {
+          resolve(true);
+          return;
+        }
+        if (Date.now() - startedAt >= timeoutMs) {
+          resolve(false);
+          return;
+        }
+        setTimeout(check, 100);
+      };
+      check();
+    });
+  }
+
   public sendPresence(userId: string, status: string) {
     this.send({ type: 'presence', userId, status });
   }

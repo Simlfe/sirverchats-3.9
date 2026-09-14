@@ -87,13 +87,17 @@ class CallSignalingService {
     };
   }
 
-  public sendCallInvite(params: {
+  public async sendCallInvite(params: {
     caller: User;
     targetUser: User;
     conversationId: string;
     callType: 'voice' | 'video';
     existingEvent?: IncomingCallEvent;
-  }): IncomingCallEvent {
+  }): Promise<IncomingCallEvent> {
+    if (!(await wsService.waitForConnection(3000))) {
+      throw new Error('Call signaling server is unavailable. Please try again when you are online.');
+    }
+
     let event = params.existingEvent;
     const callerAvatarUrl =
       getServerMemberAvatarUrl(null, params.caller, undefined) ||
@@ -162,11 +166,6 @@ class CallSignalingService {
     // proper ringing dialog; accept/decline/end signals stay on WebSocket.
     this.persistIncomingCallNotification(event);
 
-    // Record call start in PocketBase DB in background without blocking
-    pbService.startOrJoinCall(params.conversationId).catch((e) => {
-      console.warn('Call DB recording warning:', e);
-    });
-
     // Auto-timeout after 30 seconds if unanswered
     this.clearTimeoutTimer();
     this.timeoutTimer = setTimeout(() => {
@@ -181,7 +180,11 @@ class CallSignalingService {
   /** Invite a user to an already-connected voice room. This deliberately does
    * not replace activeCallEvent: a caller can invite several people while the
    * original room remains connected. */
-  public inviteToActiveRoom(params: { caller: User; targetUser: User; room: RoomConfig }): IncomingCallEvent {
+  public async inviteToActiveRoom(params: { caller: User; targetUser: User; room: RoomConfig }): Promise<IncomingCallEvent> {
+    if (!(await wsService.waitForConnection(3000))) {
+      throw new Error('Call signaling server is unavailable. Please try again when you are online.');
+    }
+
     const room = params.room;
     const callId = room.callId || `voice_${room.roomId}`;
     const callerAvatar =

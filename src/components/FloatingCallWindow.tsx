@@ -38,6 +38,7 @@ export const FloatingCallWindow: React.FC<FloatingCallWindowProps> = ({
   onExpand = () => {},
   lang = 'en',
   t = (k) => k,
+  currentChannel = null,
 }) => {
   const [isAudioMixerOpen, setIsAudioMixerOpen] = useState(false);
   const [isCollapsed, setIsCollapsed] = useState(false);
@@ -68,6 +69,12 @@ export const FloatingCallWindow: React.FC<FloatingCallWindowProps> = ({
   } = useRealtimeMedia();
 
   const isRtl = lang === 'ar';
+  // The full voice panel already owns the active-room UI.  Keep the compact
+  // overlay for DM calls and for incoming/outgoing signalling only; rendering
+  // a second connected panel over VoicePanel makes controls look duplicated
+  // and can intercept clicks on mobile.
+  const isOnVoiceChatScreen = currentChannel?.type === 'voice';
+  const floatingCallPosition = 'fixed top-3 left-1/2 -translate-x-1/2 z-[99999] w-[calc(100vw-1rem)]';
 
   // Helper to extract caller / target avatar URL
   const incomingAvatarUrl = useMemo(() => {
@@ -117,7 +124,7 @@ export const FloatingCallWindow: React.FC<FloatingCallWindowProps> = ({
           animate={{ opacity: 1, y: 0, scale: 1 }}
           exit={{ opacity: 0, y: -30, scale: 0.92 }}
           transition={{ type: 'spring', damping: 24, stiffness: 320 }}
-          className="fixed top-4 right-4 md:right-8 z-[99999] w-[calc(100vw-2rem)] max-w-sm p-4 rounded-2xl shadow-2xl border bg-[var(--theme-bg-card)] border-[var(--theme-border)] text-[var(--theme-text-primary)] select-none backdrop-blur-none"
+          className={`${floatingCallPosition} max-w-md p-4 rounded-2xl shadow-2xl border bg-[var(--theme-bg-card)] border-[var(--theme-border)] text-[var(--theme-text-primary)] select-none backdrop-blur-none`}
           dir={isRtl ? 'rtl' : 'ltr'}
         >
           {/* Top ringing header */}
@@ -224,7 +231,7 @@ export const FloatingCallWindow: React.FC<FloatingCallWindowProps> = ({
           animate={{ opacity: 1, y: 0, scale: 1 }}
           exit={{ opacity: 0, y: -30, scale: 0.92 }}
           transition={{ type: 'spring', damping: 24, stiffness: 320 }}
-          className="fixed top-4 right-4 md:right-8 z-[99999] w-[calc(100vw-2rem)] max-w-sm p-4 rounded-2xl shadow-2xl border bg-[var(--theme-bg-card)] border-[var(--theme-border)] text-[var(--theme-text-primary)] select-none backdrop-blur-none"
+          className={`${floatingCallPosition} max-w-md p-4 rounded-2xl shadow-2xl border bg-[var(--theme-bg-card)] border-[var(--theme-border)] text-[var(--theme-text-primary)] select-none backdrop-blur-none`}
           dir={isRtl ? 'rtl' : 'ltr'}
         >
           {/* Top calling header */}
@@ -335,14 +342,14 @@ export const FloatingCallWindow: React.FC<FloatingCallWindowProps> = ({
       )}
 
       {/* 3. ACTIVE CONNECTED CALL / ROOM FLOATING WINDOW */}
-      {!incomingCall && !outgoingCall && activeRoom && (
+      {!isOnVoiceChatScreen && !incomingCall && !outgoingCall && activeRoom && (
         <motion.div
           key="active-room-floating"
           initial={{ opacity: 0, y: -20, scale: 0.95 }}
           animate={{ opacity: 1, y: 0, scale: 1 }}
           exit={{ opacity: 0, y: -20, scale: 0.95 }}
           transition={{ type: 'spring', damping: 25, stiffness: 350 }}
-          className="fixed top-4 right-4 md:right-8 z-[99999] w-[calc(100vw-2rem)] max-w-sm rounded-2xl shadow-2xl border bg-[var(--theme-bg-card)] border-[var(--theme-border)] text-[var(--theme-text-primary)] select-none overflow-hidden"
+          className={`${floatingCallPosition} max-w-2xl rounded-2xl shadow-2xl border bg-[var(--theme-bg-card)] border-[var(--theme-border)] text-[var(--theme-text-primary)] select-none overflow-hidden`}
           dir={isRtl ? 'rtl' : 'ltr'}
         >
           {/* Header Bar */}
@@ -382,8 +389,28 @@ export const FloatingCallWindow: React.FC<FloatingCallWindowProps> = ({
                     <span>{formattedDuration}</span>
                   </span>
                   <span>•</span>
-                  <span className="text-emerald-500 font-semibold">
-                    {isRtl ? 'متصل' : 'Connected'}
+                  <span className={`font-semibold ${
+                    connectionState === 'connected'
+                      ? 'text-emerald-500'
+                      : connectionState === 'reconnecting' || connectionState === 'connecting' || connectionState === 'joining'
+                      ? 'text-amber-500'
+                      : 'text-red-500'
+                  }`}>
+                    {isRtl
+                      ? connectionState === 'connected'
+                        ? 'متصل'
+                        : connectionState === 'reconnecting'
+                        ? 'إعادة الاتصال...'
+                        : connectionState === 'connecting' || connectionState === 'joining'
+                        ? 'جارٍ الاتصال...'
+                        : 'غير متصل'
+                      : connectionState === 'connected'
+                      ? 'Connected'
+                      : connectionState === 'reconnecting'
+                      ? 'Reconnecting…'
+                      : connectionState === 'connecting' || connectionState === 'joining'
+                      ? 'Connecting…'
+                      : 'Disconnected'}
                   </span>
                 </div>
               </div>

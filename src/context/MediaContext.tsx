@@ -160,6 +160,13 @@ export const MediaProvider: React.FC<{
     callType: 'voice' | 'video';
   } | null>(null);
   const joiningRoomIdRef = useRef<string | null>(null);
+  const voiceRecoveryAttemptedRef = useRef<string | null>(null);
+  // A call-accept can arrive through the local BroadcastChannel and the
+  // server WebSocket. Only the first event may start the media join.
+  const acceptedCallIdsRef = useRef<Set<string>>(new Set());
+  // Ignore late accepts that were already cancelled/ended. WebSocket and
+  // BroadcastChannel delivery can be reordered during a reconnect.
+  const settledCallIdsRef = useRef<Set<string>>(new Set());
   const outgoingCallRef = useRef<IncomingCallEvent | null>(outgoingCall);
   outgoingCallRef.current = outgoingCall;
   const incomingCallRef = useRef<IncomingCallEvent | null>(incomingCall);
@@ -251,6 +258,11 @@ export const MediaProvider: React.FC<{
             setOutgoingCall(null);
           }
         } else if (['declined', 'cancelled', 'ended', 'missed', 'busy', 'timeout'].includes(event.state)) {
+          acceptedCallIdsRef.current.delete(event.callId);
+          if (event.roomType !== 'voice_room') {
+            settledCallIdsRef.current.add(event.callId);
+            setTimeout(() => settledCallIdsRef.current.delete(event.callId), 60_000);
+          }
           // Log call to chat if not already logged
           const callTarget = activeCallTargetRef.current;
           const dur = activeCallDurationRef.current;
@@ -303,6 +315,11 @@ export const MediaProvider: React.FC<{
           const isCaller = (myId && callerId === myId) || (activeOutgoing && activeOutgoing.callId === event.callId);
 
           if (isCaller && activeUser) {
+            if (settledCallIdsRef.current.has(event.callId)) return;
+            if (acceptedCallIdsRef.current.has(event.callId)) {
+              return;
+            }
+            acceptedCallIdsRef.current.add(event.callId);
             setOutgoingCall(null);
 
             // A voice-room invite is an acknowledgement from another
@@ -362,6 +379,18 @@ export const MediaProvider: React.FC<{
               startDurationTimer();
             } catch (joinErr) {
               console.warn('[MediaContext] Join room error upon call accept:', joinErr);
+              // The callee must not remain in an accepted state when the
+              // caller cannot establish media. Tear down the local session
+              // and send one terminal signal so both clients leave cleanly.
+              await realtimeMediaProvider.leaveRoom().catch(() => {});
+              setActiveRoom(null);
+              setParticipants([]);
+              stopDurationTimer();
+              setError({
+                code: 'SFU_UNAVAILABLE',
+                message: joinErr instanceof Error ? joinErr.message : 'Failed to connect to the LiveKit media server',
+              });
+              callSignalingService.cancelCall(event.callId, 'cancelled', event);
             }
           }
 
@@ -411,7 +440,9 @@ export const MediaProvider: React.FC<{
   // Join Voice Room (max 8 participants)
   const joinVoiceRoom = useCallback(
     async (channel: Channel, user: User, mode: 'voice' | 'video' | 'screen' = 'voice') => {
-      if (joiningRoomIdRef.current === channel.id || (activeRoom && activeRoom.roomId === channel.id)) {
+      const roomIsSettled = activeRoom && activeRoom.roomId === channel.id &&
+        ['joining', 'connecting', 'connected', 'reconnecting'].includes(connectionState);
+      if (joiningRoomIdRef.current === channel.id || roomIsSettled) {
         return;
       }
       joiningRoomIdRef.current = channel.id;
@@ -427,6 +458,8 @@ export const MediaProvider: React.FC<{
             message: micPerm.error || 'Microphone permission was not granted.',
           });
           setConnectionState('disconnected');
+          voiceSessionRecovery.clearSession();
+          voiceRecoveryAttemptedRef.current = channel.id;
           joiningRoomIdRef.current = null;
           return;
         }
@@ -434,13 +467,17 @@ export const MediaProvider: React.FC<{
         // Check channel max user limit
         const opts = parseChannelOptions(channel);
         const userLimit = opts.user_limit || channel.user_limit || 8;
-        const currentCount = realtimeMediaProvider.getParticipants().length;
+        // Participants from a different active room must not make the next
+        // channel appear full while the previous room is being torn down.
+        const currentCount = activeRoom?.roomId === channel.id ? realtimeMediaProvider.getParticipants().length : 0;
         if (currentCount >= userLimit && activeRoom?.roomId !== channel.id) {
           setError({
             code: 'ROOM_FULL',
             message: `Channel is full (Max limit is ${userLimit} users)`,
           });
           setConnectionState('disconnected');
+          voiceSessionRecovery.clearSession();
+          voiceRecoveryAttemptedRef.current = channel.id;
           joiningRoomIdRef.current = null;
           return;
         }
@@ -485,6 +522,11 @@ export const MediaProvider: React.FC<{
         startDurationTimer();
       } catch (err: any) {
         console.error('Failed to join voice room:', err);
+        // Do not immediately retry a failed recovery session. Keeping the
+        // two-minute marker here caused an effect-driven connect/disconnect
+        // loop whenever the VPS or token endpoint was unavailable.
+        voiceSessionRecovery.clearSession();
+        voiceRecoveryAttemptedRef.current = channel.id;
         setActiveRoom(null);
         setParticipants([]);
         setConnectionState('disconnected');
@@ -496,14 +538,20 @@ export const MediaProvider: React.FC<{
         joiningRoomIdRef.current = null;
       }
     },
-    [activeRoom, isMuted, isDeafened, isCameraEnabled, isScreenSharing]
+    [activeRoom, connectionState, isMuted, isDeafened, isCameraEnabled, isScreenSharing]
   );
 
   // Voice Session Recovery Check (within 2-minute window)
   useEffect(() => {
     if (!currentUser) return;
     const session = voiceSessionRecovery.getValidSession();
-    if (session && session.userId === currentUser.id && !activeRoom && !joiningRoomIdRef.current) {
+    if (!session || session.userId !== currentUser.id) {
+      voiceRecoveryAttemptedRef.current = null;
+      return;
+    }
+    if (voiceRecoveryAttemptedRef.current === session.channelId) return;
+    if (!activeRoom && !joiningRoomIdRef.current) {
+      voiceRecoveryAttemptedRef.current = session.channelId;
       console.log(
         `[VoiceRecovery] Restoring active voice session for channel "${session.channelId}" (joined ${Math.round(
           (Date.now() - session.joinTimestamp) / 1000
@@ -514,7 +562,7 @@ export const MediaProvider: React.FC<{
         name: session.channelName || 'Voice Channel',
         server: session.serverId,
       };
-      joinVoiceRoom(mockChannel, currentUser, session.mode);
+      joinVoiceRoom(mockChannel, currentUser, session.mode).catch(() => {});
     }
   }, [currentUser, activeRoom, joinVoiceRoom]);
 
@@ -526,17 +574,38 @@ export const MediaProvider: React.FC<{
       dmChannel: Channel,
       mode: 'voice' | 'video' | 'screen' = 'voice'
     ) => {
-      if (joiningRoomIdRef.current === dmChannel.id || (activeRoom && activeRoom.roomId === dmChannel.id)) {
+      const roomIsSettled = activeRoom && activeRoom.roomId === dmChannel.id &&
+        ['joining', 'connecting', 'connected', 'reconnecting'].includes(connectionState);
+      if (joiningRoomIdRef.current === dmChannel.id || roomIsSettled) {
         return;
       }
       joiningRoomIdRef.current = dmChannel.id;
       try {
         setError(null);
+
+        const callId = `call_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+        const callType = mode === 'video' ? 'video' : 'voice';
+        const roomName = targetUser.display_name || targetUser.username || 'Voice Call';
+
+        // Acquire the token before notifying the other user. A dead VPS or
+        // SFU should fail locally and immediately, rather than leaving a
+        // ringing notification and a queued call record behind.
+        await realtimeMediaProvider.preflightRoom({
+          roomId: dmChannel.id,
+          roomName,
+          roomType: 'dm_call',
+          maxParticipants: 2,
+          user: currentUserObj,
+          initialMode: mode,
+          callId,
+          channelId: dmChannel.id,
+        });
+
         if (activeRoom && activeRoom.roomId !== dmChannel.id) {
           if (activeRoom.callId) {
             callSignalingService.endCall(activeRoom.callId);
           }
-          realtimeMediaProvider.leaveRoom().catch(() => {});
+          await realtimeMediaProvider.leaveRoom().catch(() => {});
         }
 
         activeCallDurationRef.current = 0;
@@ -548,7 +617,6 @@ export const MediaProvider: React.FC<{
           callType: mode === 'video' ? 'video' : 'voice',
         };
 
-        const callId = `call_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
         const callerAvatarUrl =
           getServerMemberAvatarUrl(null, currentUserObj, undefined) ||
           (currentUserObj.avatar
@@ -565,8 +633,12 @@ export const MediaProvider: React.FC<{
           callerUser: currentUserObj,
           targetUser,
           targetUserId: targetUser.id,
-          callType: mode === 'video' ? 'video' : 'voice',
+          callType,
           conversationId: dmChannel.id,
+          roomType: 'dm_call',
+          roomName,
+          maxParticipants: 2,
+          channelId: dmChannel.id,
           state: 'ringing',
           timestamp: Date.now(),
         };
@@ -575,25 +647,26 @@ export const MediaProvider: React.FC<{
         setOutgoingCall(signalEvent);
 
         // 2. Dispatch signaling & start outgoing ringback chime
-        callSignalingService.sendCallInvite({
+        await callSignalingService.sendCallInvite({
           caller: currentUserObj,
           targetUser,
           conversationId: dmChannel.id,
-          callType: mode === 'video' ? 'video' : 'voice',
+          callType,
           existingEvent: signalEvent,
         });
       } catch (err: any) {
         console.error('Failed to start DM call:', err);
+        activeCallTargetRef.current = null;
         setOutgoingCall(null);
         setError({
-          code: 'SFU_UNAVAILABLE',
+          code: err?.code === 'TOKEN_ERROR' ? 'TOKEN_ERROR' : 'SFU_UNAVAILABLE',
           message: err?.message || 'Failed to start DM call',
         });
       } finally {
         joiningRoomIdRef.current = null;
       }
     },
-    [activeRoom]
+    [activeRoom, connectionState]
   );
 
   // Invite additional users to an already-connected server voice room. The
@@ -609,9 +682,13 @@ export const MediaProvider: React.FC<{
     for (const target of targets) {
       if (!target?.id || target.id === caller.id || occupied.has(target.id)) continue;
       if (occupied.size >= limit) break;
-      callSignalingService.inviteToActiveRoom({ caller, targetUser: target, room });
-      occupied.add(target.id);
-      sent += 1;
+      try {
+        await callSignalingService.inviteToActiveRoom({ caller, targetUser: target, room });
+        occupied.add(target.id);
+        sent += 1;
+      } catch (err) {
+        console.warn('[MediaContext] Could not invite user to voice room:', err);
+      }
     }
     return sent;
   }, [activeRoom, currentUser]);
