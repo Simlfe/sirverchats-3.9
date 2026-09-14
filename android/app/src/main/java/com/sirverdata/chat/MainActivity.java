@@ -6,11 +6,16 @@ import android.view.View;
 import android.view.WindowInsets;
 import android.view.WindowInsetsController;
 import android.webkit.PermissionRequest;
+import android.webkit.WebView;
+import com.getcapacitor.BridgeActivity;
 import com.getcapacitor.BridgeWebChromeClient;
 
 public class MainActivity extends BridgeActivity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
+        // Register the route bridge before BridgeActivity creates the Capacitor
+        // bridge so it is available as Capacitor.Plugins.AudioRoute.
+        initialPlugins.add(AudioRoutePlugin.class);
         super.onCreate(savedInstanceState);
 
         // Ensure window decor fits system windows so app layout does not stretch under Android status bar
