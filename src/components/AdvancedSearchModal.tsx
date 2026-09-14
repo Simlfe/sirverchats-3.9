@@ -180,6 +180,14 @@ export default function AdvancedSearchModal({
     const cachedUsers = pbService.getCachedUsers();
     setMemberDirectory(buildMemberSuggestions(cachedMembers, cachedUsers, currentUser, server));
 
+    // ChatPanel already refreshes this collection in the background. Avoid a
+    // second request when the modal is opened after that shared state is ready.
+    if (serverMembers.length > 0) {
+      return () => {
+        cancelled = true;
+      };
+    }
+
     pbService.fetchServerMembers(server.id).then((freshMembers) => {
       if (cancelled || !Array.isArray(freshMembers)) return;
       setMemberDirectory(buildMemberSuggestions(freshMembers, pbService.getCachedUsers(), currentUser, server));
