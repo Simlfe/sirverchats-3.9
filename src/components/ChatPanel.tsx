@@ -8112,6 +8112,7 @@ function ChatPanel({
           server={server || null}
           currentChannel={channel}
           serverChannels={serverChannels}
+          serverMembers={serverMembers}
           currentUser={currentUser}
           onClose={() => setShowAdvancedSearchModal(false)}
           onSelectMessage={(chanId, msgId) => {
