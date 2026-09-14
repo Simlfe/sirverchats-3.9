@@ -18,11 +18,13 @@ import {
   BellOff,
   ChevronDown,
   ChevronUp,
+  UserPlus,
 } from 'lucide-react';
 import { useRealtimeMedia } from '../context/MediaContext';
 import { getServerMemberAvatarUrl, pbService } from '../pocketbase';
 import Avatar from './Avatar';
 import AudioMixerModal from './AudioMixerModal';
+import CallInviteModal from './CallInviteModal';
 import { Channel } from '../types';
 
 interface FloatingCallWindowProps {
@@ -39,6 +41,7 @@ export const FloatingCallWindow: React.FC<FloatingCallWindowProps> = ({
 }) => {
   const [isAudioMixerOpen, setIsAudioMixerOpen] = useState(false);
   const [isCollapsed, setIsCollapsed] = useState(false);
+  const [isInviteOpen, setIsInviteOpen] = useState(false);
 
   const {
     activeRoom,
@@ -61,6 +64,7 @@ export const FloatingCallWindow: React.FC<FloatingCallWindowProps> = ({
     declineCall,
     cancelOutgoingCall,
     leaveRoomOrCall,
+    inviteUsersToCall,
   } = useRealtimeMedia();
 
   const isRtl = lang === 'ar';
@@ -387,6 +391,17 @@ export const FloatingCallWindow: React.FC<FloatingCallWindowProps> = ({
 
             {/* Quick Actions in Header */}
             <div className="flex items-center gap-1 shrink-0">
+              {activeRoom.roomType === 'voice_room' && (
+                <button
+                  type="button"
+                  onClick={() => setIsInviteOpen(true)}
+                  className="p-1.5 rounded-lg text-accent hover:bg-accent/15 transition-colors cursor-pointer"
+                  title={isRtl ? 'دعوة أشخاص للمكالمة' : 'Invite people to call'}
+                  aria-label={isRtl ? 'دعوة أشخاص للمكالمة' : 'Invite people to call'}
+                >
+                  <UserPlus className="w-3.5 h-3.5" />
+                </button>
+              )}
               <button
                 type="button"
                 onClick={onExpand}
@@ -550,6 +565,16 @@ export const FloatingCallWindow: React.FC<FloatingCallWindowProps> = ({
           )}
         </motion.div>
       )}
+
+      <CallInviteModal
+        isOpen={Boolean(isInviteOpen && activeRoom?.roomType === 'voice_room')}
+        onClose={() => setIsInviteOpen(false)}
+        currentUserId={activeRoom?.user.id || ''}
+        participants={participants}
+        maxParticipants={activeRoom?.maxParticipants || 8}
+        lang={lang}
+        onInvite={async (user) => (await inviteUsersToCall([user])) > 0}
+      />
     </AnimatePresence>
   );
 };

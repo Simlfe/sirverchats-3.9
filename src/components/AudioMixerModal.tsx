@@ -3,6 +3,8 @@ import { createPortal } from 'react-dom';
 import { Sliders, Volume2, VolumeX, Mic, X, RotateCcw, ScreenShare } from 'lucide-react';
 import { audioMixer, AudioMixerState } from '../services/audioMixer';
 import { MediaParticipant } from '../types/media';
+import { AudioOutputRoute } from '../types/media';
+import { useRealtimeMedia } from '../context/MediaContext';
 
 interface AudioMixerModalProps {
   isOpen: boolean;
@@ -23,6 +25,8 @@ export const AudioMixerModal: React.FC<AudioMixerModalProps> = ({
 }) => {
   const isAr = lang === 'ar';
   const [mixerState, setMixerState] = useState<AudioMixerState>(audioMixer.getState());
+  const { audioOutputRoute, setAudioOutputRoute } = useRealtimeMedia();
+  const [routeNotice, setRouteNotice] = useState<string | null>(null);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -49,6 +53,16 @@ export const AudioMixerModal: React.FC<AudioMixerModalProps> = ({
   const effectiveUserId = currentUserId || currentUser?.id || '';
   const remoteParticipants = participants.filter((p) => p.userId !== effectiveUserId);
   const screenShareParticipants = participants.filter((p) => p.isScreenSharing);
+
+  const handleOutputRoute = async (route: AudioOutputRoute) => {
+    const applied = await setAudioOutputRoute(route);
+    setRouteNotice(
+      applied
+        ? (isAr ? 'تم تغيير مخرج الصوت.' : 'Audio output updated.')
+        : (isAr ? 'يتحكم الهاتف بمخرج الصوت تلقائياً.' : 'Your phone controls the physical audio output automatically.')
+    );
+    window.setTimeout(() => setRouteNotice(null), 3200);
+  };
 
   return createPortal(
     <div
@@ -96,6 +110,35 @@ export const AudioMixerModal: React.FC<AudioMixerModalProps> = ({
               onChange={(e) => audioMixer.setMasterVolume(Number(e.target.value))}
               className="w-full accent-accent h-1.5 bg-[var(--theme-border)] rounded-lg cursor-pointer"
             />
+          </div>
+
+          {/* Phone-friendly output routing. Native shells can switch the
+              receiver/speaker directly; browsers use setSinkId where offered. */}
+          <div className="space-y-2 p-3.5 rounded-xl bg-[var(--theme-bg-card)] border border-[var(--theme-border)]">
+            <div className="flex items-center justify-between gap-2">
+              <span className="font-bold flex items-center gap-2 text-[var(--theme-text-primary)]">
+                <Volume2 className="w-4 h-4 text-accent" /> {isAr ? 'مخرج صوت المكالمة' : 'Call audio output'}
+              </span>
+              <span className="text-[10px] text-[var(--theme-text-muted)]">
+                {audioOutputRoute === 'speaker' ? (isAr ? 'السماعة الخارجية' : 'Speaker') : audioOutputRoute === 'earpiece' ? (isAr ? 'سماعة الهاتف' : 'Earpiece') : (isAr ? 'افتراضي' : 'Default')}
+              </span>
+            </div>
+            <div className="grid grid-cols-3 gap-1.5">
+              {(['default', 'speaker', 'earpiece'] as AudioOutputRoute[]).map((route) => {
+                const label = route === 'speaker' ? (isAr ? 'خارجي' : 'Speaker') : route === 'earpiece' ? (isAr ? 'داخلي' : 'Earpiece') : (isAr ? 'افتراضي' : 'Default');
+                return (
+                  <button
+                    key={route}
+                    type="button"
+                    onClick={() => handleOutputRoute(route)}
+                    className={`py-2 px-1 rounded-lg border text-[10px] font-bold transition-colors cursor-pointer ${audioOutputRoute === route ? 'bg-accent/15 border-accent/40 text-accent' : 'bg-[var(--theme-bg-secondary)] border-[var(--theme-border)] text-[var(--theme-text-muted)] hover:text-[var(--theme-text-primary)]'}`}
+                  >
+                    {label}
+                  </button>
+                );
+              })}
+            </div>
+            {routeNotice && <p className="text-[10px] text-[var(--theme-text-muted)] leading-snug">{routeNotice}</p>}
           </div>
 
           {/* Master Stream / Screen Audio Volume */}

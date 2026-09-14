@@ -10,6 +10,7 @@ import {
   CameraQualityProfile,
   CameraPublishOptions,
   CameraTelemetryData,
+  AudioOutputRoute,
 } from '../types/media';
 import { getServerMemberAvatarUrl, getServerMemberDisplayName, pbService } from '../pocketbase';
 import liveKitSFUAdapter from './livekit/LiveKitSFUAdapter';
@@ -33,6 +34,8 @@ export interface IRealtimeMediaProvider {
   startScreenShare(): Promise<MediaStreamTrack | null>;
   stopScreenShare(): void;
   setParticipantVolume(userId: string, volume: number): void;
+  setAudioOutputRoute(route: AudioOutputRoute): Promise<boolean>;
+  getAudioOutputRoute(): AudioOutputRoute;
   getParticipants(): MediaParticipant[];
   getConnectionState(): MediaConnectionState;
   subscribe(listener: (event: MediaProviderEvent) => void): () => void;
@@ -690,6 +693,14 @@ export class RealtimeMediaProvider implements IRealtimeMediaProvider {
 
     console.log(`[CAMERA_PIPELINE] Auto profile resolved to ULTRA (downlink=${downlink}Mbps)`);
     return 'ultra';
+  }
+
+  public setAudioOutputRoute(route: AudioOutputRoute): Promise<boolean> {
+    return LiveKitManager.getInstance().setAudioOutputRoute(route);
+  }
+
+  public getAudioOutputRoute(): AudioOutputRoute {
+    return LiveKitManager.getInstance().getAudioOutputRoute();
   }
 
   private getCameraProfileSpecs(activeProfile: 'low' | 'balanced' | 'high' | 'ultra') {

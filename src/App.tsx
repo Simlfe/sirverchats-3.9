@@ -6,7 +6,7 @@ import { getLanguageDictionary } from './services/localization';
 import { Bell, Volume2 } from 'lucide-react';
 import { App as CapApp } from '@capacitor/app';
 import { User, Server, Channel, Message, Attachment, Translation, AppLanguageConfig, MusicTrack, NotificationItem, UnreadChannelInfo, Call } from './types';
-import { sendInAppNotification, requestNotificationPermission } from './lib/notifications';
+import { sendInAppNotification, requestNotificationPermission, isEphemeralCallNotification } from './lib/notifications';
 import { notificationService } from './services/notificationService';
 import { playLeaveSound, playPingSound } from './lib/sounds';
 import {
@@ -941,28 +941,21 @@ export default function App() {
   // 1e. Load user's saved notifications from database on login
   useEffect(() => {
     if (currentUser?.id) {
-      const isCallSignal = (n: NotificationItem | any) => {
-        const content = n.message_content || n.message || '';
-        if (typeof content === 'string' && (content.includes('INCOMING_CALL:') || content.startsWith('INCOMING_CALL:'))) return true;
-        if (n.id && String(n.id).startsWith('call_') && !content.includes('[CALL_LOG:')) return true;
-        return false;
-      };
-
       if (currentUser.notifications) {
         if (typeof currentUser.notifications === 'string') {
           try {
             const parsed = JSON.parse(currentUser.notifications);
             if (Array.isArray(parsed)) {
-              setNotificationsList(parsed.filter((n) => !isCallSignal(n)));
+              setNotificationsList(parsed.filter((n) => !isEphemeralCallNotification(n)));
             }
           } catch (e) {}
         } else if (Array.isArray(currentUser.notifications)) {
-          setNotificationsList(currentUser.notifications.filter((n) => !isCallSignal(n)));
+          setNotificationsList(currentUser.notifications.filter((n) => !isEphemeralCallNotification(n)));
         }
       } else {
         pbService.getUserNotifications(currentUser.id).then((notifs) => {
           if (notifs && notifs.length > 0) {
-            setNotificationsList(notifs.filter((n) => !isCallSignal(n)));
+            setNotificationsList(notifs.filter((n) => !isEphemeralCallNotification(n)));
           }
         });
       }
@@ -1821,10 +1814,7 @@ export default function App() {
               });
             });
 
-            const cleanRemoteNotifs = remoteNotifs.filter((rn) => {
-              const c = rn.message_content || rn.message || '';
-              return !c.includes('INCOMING_CALL:') && !(rn.id?.startsWith('call_') && !c.includes('[CALL_LOG:'));
-            });
+            const cleanRemoteNotifs = remoteNotifs.filter((rn) => !isEphemeralCallNotification(rn));
 
             return cleanRemoteNotifs;
           });

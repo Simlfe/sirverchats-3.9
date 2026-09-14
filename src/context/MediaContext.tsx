@@ -10,6 +10,7 @@ import {
   SFUProviderAdapter,
   CameraQualityProfile,
   CameraTelemetryData,
+  AudioOutputRoute,
 } from '../types/media';
 import realtimeMediaProvider from '../media/RealtimeMediaProvider';
 import callSignalingService from '../services/callSignaling';
@@ -35,10 +36,12 @@ interface MediaContextType {
   error: MediaError | null;
   cameraQualityProfile: CameraQualityProfile;
   cameraTelemetry: CameraTelemetryData | null;
+  audioOutputRoute: AudioOutputRoute;
   
   // Actions
   joinVoiceRoom: (channel: Channel, currentUser: User, mode?: 'voice' | 'video' | 'screen') => Promise<void>;
   startDmCall: (targetUser: User, currentUser: User, dmChannel: Channel, mode?: 'voice' | 'video' | 'screen') => Promise<void>;
+  inviteUsersToCall: (targets: User[]) => Promise<number>;
   acceptCall: () => Promise<void>;
   declineCall: () => void;
   cancelOutgoingCall: () => void;
@@ -52,6 +55,7 @@ interface MediaContextType {
   setCameraQualityProfile: (profile: CameraQualityProfile) => void;
   toggleScreenShare: () => Promise<void>;
   setParticipantVolume: (userId: string, volume: number) => void;
+  setAudioOutputRoute: (route: AudioOutputRoute) => Promise<boolean>;
   clearError: () => void;
   
   // Infrastructure integration injection methods
@@ -86,6 +90,7 @@ export const MediaProvider: React.FC<{
     return realtimeMediaProvider.getCameraQualityProfile();
   });
   const [cameraTelemetry, setCameraTelemetry] = useState<CameraTelemetryData | null>(null);
+  const [audioOutputRoute, setAudioOutputRouteState] = useState<AudioOutputRoute>(() => realtimeMediaProvider.getAudioOutputRoute());
 
   const toggleMuteRing = useCallback((override?: boolean) => {
     setIsRingMuted((prev) => {
@@ -137,6 +142,12 @@ export const MediaProvider: React.FC<{
     realtimeMediaProvider.setCameraQualityProfile(profile);
     setCameraQualityProfileState(profile);
     setCameraTelemetry(realtimeMediaProvider.getActiveCameraTelemetry());
+  }, []);
+
+  const setAudioOutputRoute = useCallback(async (route: AudioOutputRoute) => {
+    const applied = await realtimeMediaProvider.setAudioOutputRoute(route);
+    setAudioOutputRouteState(realtimeMediaProvider.getAudioOutputRoute());
+    return applied;
   }, []);
 
   const durationTimerRef = useRef<any>(null);
@@ -296,13 +307,14 @@ export const MediaProvider: React.FC<{
             const targetUser = activeOutgoing?.targetUser || event.targetUser;
             const config: RoomConfig = {
               roomId: event.conversationId,
-              roomName: targetUser ? (targetUser.display_name || targetUser.username) : `@${event.callerName}`,
-              roomType: 'dm_call',
-              maxParticipants: 2,
+              roomName: event.roomName || (targetUser ? (targetUser.display_name || targetUser.username) : (event.callerName ? `@${event.callerName}` : 'Voice Call')),
+              roomType: event.roomType || 'dm_call',
+              maxParticipants: event.maxParticipants || (event.roomType === 'voice_room' ? 8 : 2),
               user: activeUser,
               initialMode: event.callType === 'video' ? 'video' : 'voice',
-              callId: event.callId,
-              channelId: event.conversationId,
+              callId: event.roomType === 'voice_room' ? undefined : event.callId,
+              channelId: event.channelId || event.conversationId,
+              serverId: event.serverId,
             };
 
             setActiveRoom(config);
@@ -574,6 +586,26 @@ export const MediaProvider: React.FC<{
     [activeRoom]
   );
 
+  // Invite additional users to an already-connected server voice room. The
+  // room remains shared and no extra caller overlay is created locally.
+  const inviteUsersToCall = useCallback(async (targets: User[]): Promise<number> => {
+    const room = activeRoomRef.current || activeRoom;
+    const caller = currentUserRef.current || currentUser || pbService.getCurrentUser();
+    if (!room || room.roomType !== 'voice_room' || !caller || !Array.isArray(targets)) return 0;
+
+    const occupied = new Set(realtimeMediaProvider.getParticipants().map((participant) => participant.userId));
+    const limit = room.maxParticipants || 8;
+    let sent = 0;
+    for (const target of targets) {
+      if (!target?.id || target.id === caller.id || occupied.has(target.id)) continue;
+      if (occupied.size >= limit) break;
+      callSignalingService.inviteToActiveRoom({ caller, targetUser: target, room });
+      occupied.add(target.id);
+      sent += 1;
+    }
+    return sent;
+  }, [activeRoom, currentUser]);
+
   // Accept incoming call
   const acceptCall = useCallback(async () => {
     unlockAudioContext();
@@ -597,13 +629,14 @@ export const MediaProvider: React.FC<{
 
       const config: RoomConfig = {
         roomId: event.conversationId,
-        roomName: event.callerName,
-        roomType: 'dm_call',
-        maxParticipants: 2,
+        roomName: event.roomName || event.callerName,
+        roomType: event.roomType || 'dm_call',
+        maxParticipants: event.maxParticipants || (event.roomType === 'voice_room' ? 8 : 2),
         user: activeUser,
         initialMode: event.callType === 'video' ? 'video' : 'voice',
-        callId: event.callId,
-        channelId: event.conversationId,
+        callId: event.roomType === 'voice_room' ? undefined : event.callId,
+        channelId: event.channelId || event.conversationId,
+        serverId: event.serverId,
       };
 
       setActiveRoom(config);
@@ -840,9 +873,11 @@ export const MediaProvider: React.FC<{
       error,
       cameraQualityProfile,
       cameraTelemetry,
+      audioOutputRoute,
 
       joinVoiceRoom,
       startDmCall,
+      inviteUsersToCall,
       acceptCall,
       declineCall,
       cancelOutgoingCall,
@@ -856,6 +891,7 @@ export const MediaProvider: React.FC<{
       setCameraQualityProfile,
       toggleScreenShare,
       setParticipantVolume,
+      setAudioOutputRoute,
       clearError,
       setSFUAdapter,
       setSFUConfig,
@@ -876,8 +912,10 @@ export const MediaProvider: React.FC<{
       error,
       cameraQualityProfile,
       cameraTelemetry,
+      audioOutputRoute,
       joinVoiceRoom,
       startDmCall,
+      inviteUsersToCall,
       acceptCall,
       declineCall,
       cancelOutgoingCall,
@@ -891,6 +929,7 @@ export const MediaProvider: React.FC<{
       setCameraQualityProfile,
       toggleScreenShare,
       setParticipantVolume,
+      setAudioOutputRoute,
       clearError,
       setSFUAdapter,
       setSFUConfig,

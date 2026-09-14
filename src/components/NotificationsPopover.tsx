@@ -22,6 +22,7 @@ import {
 import { motion, AnimatePresence } from 'motion/react';
 import { pbService } from '../pocketbase';
 import { toLatinNumerals } from '../lib/utils';
+import { isEphemeralCallNotification } from '../lib/notifications';
 import { parseCallLog, formatCallDuration } from '../services/callLogService';
 
 interface NotificationsPopoverProps {
@@ -51,16 +52,7 @@ const NotificationsPopover = React.memo(function NotificationsPopover({
 }: NotificationsPopoverProps) {
   // Filter out any raw ephemeral call signaling payloads that might have leaked into storage
   const filteredNotifications = React.useMemo(() => {
-    return notifications.filter((n) => {
-      const content = n.message_content || n.message || '';
-      if (typeof content === 'string' && (content.includes('INCOMING_CALL:') || content.startsWith('INCOMING_CALL:'))) {
-        return false;
-      }
-      if (n.id && String(n.id).startsWith('call_') && !content.includes('CALL_LOG:')) {
-        return false;
-      }
-      return true;
-    });
+    return notifications.filter((n) => !isEphemeralCallNotification(n));
   }, [notifications]);
 
   const unreadCount = React.useMemo(() => filteredNotifications.filter((n) => !n.read).length, [filteredNotifications]);
@@ -150,7 +142,7 @@ const NotificationsPopover = React.memo(function NotificationsPopover({
                   <Check className="w-3.5 h-3.5" />
                 </button>
               )}
-              {notifications.length > 0 && (
+              {filteredNotifications.length > 0 && (
                 <button
                   onClick={onClearNotifications}
                   className={`p-1.5 rounded-lg text-xs font-bold transition-all border-0 cursor-pointer text-red-400 hover:bg-red-500/10`}
@@ -172,7 +164,7 @@ const NotificationsPopover = React.memo(function NotificationsPopover({
 
           {/* List */}
           <div className="flex-1 overflow-y-auto p-2 space-y-2 scrollbar-thin">
-            {notifications.length === 0 ? (
+            {filteredNotifications.length === 0 ? (
               <div className="py-12 flex flex-col items-center justify-center text-center p-4 gap-2 text-slate-500">
                 <Bell className="w-8 h-8 opacity-40" />
                 <p className="text-xs font-bold">

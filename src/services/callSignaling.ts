@@ -1,5 +1,5 @@
 import { User } from '../types';
-import { IncomingCallEvent, CallSignalingState } from '../types/media';
+import { IncomingCallEvent, CallSignalingState, RoomConfig } from '../types/media';
 import wsService, { WSEvent } from './websocket';
 import { pbService, getServerMemberAvatarUrl } from '../pocketbase';
 import {
@@ -157,22 +157,10 @@ class CallSignalingService {
       },
     });
 
-    // Also push real-time call notification to target user in background without blocking
-    pbService
-      .addNotificationToUser(params.targetUser.id, {
-        id: `call_${callId}`,
-        type: 'system',
-        sender_id: params.caller.id,
-        sender_name: params.caller.display_name || params.caller.username,
-        sender_avatar: callerAvatarUrl,
-        channel_id: params.conversationId,
-        message_content: `INCOMING_CALL:${JSON.stringify({ ...event, targetUserId: params.targetUser.id })}`,
-        created: new Date().toISOString(),
-        read: false,
-      })
-      .catch((e) => {
-        console.warn('Call notification dispatch warning:', e);
-      });
+    // Persist only the incoming invite as an offline-safe transport signal.
+    // The notification UI filters it and the call service turns it into a
+    // proper ringing dialog; accept/decline/end signals stay on WebSocket.
+    this.persistIncomingCallNotification(event);
 
     // Record call start in PocketBase DB in background without blocking
     pbService.startOrJoinCall(params.conversationId).catch((e) => {
@@ -187,6 +175,49 @@ class CallSignalingService {
       }
     }, 30000);
 
+    return event;
+  }
+
+  /** Invite a user to an already-connected voice room. This deliberately does
+   * not replace activeCallEvent: a caller can invite several people while the
+   * original room remains connected. */
+  public inviteToActiveRoom(params: { caller: User; targetUser: User; room: RoomConfig }): IncomingCallEvent {
+    const room = params.room;
+    const callId = room.callId || `voice_${room.roomId}`;
+    const callerAvatar =
+      getServerMemberAvatarUrl(null, params.caller, room.serverId) ||
+      (params.caller.avatar
+        ? params.caller.avatar.startsWith('http') || params.caller.avatar.startsWith('blob:') || params.caller.avatar.startsWith('data:')
+          ? params.caller.avatar
+          : `${pbService.getServerUrl()}/api/files/users/${params.caller.id}/${params.caller.avatar}`
+        : '');
+    const event: IncomingCallEvent = {
+      callId,
+      callerId: params.caller.id,
+      callerName: params.caller.display_name || params.caller.username,
+      callerAvatar,
+      callerUser: params.caller,
+      targetUser: params.targetUser,
+      targetUserId: params.targetUser.id,
+      callType: room.initialMode === 'video' ? 'video' : 'voice',
+      conversationId: room.roomId,
+      roomType: room.roomType,
+      roomName: room.roomName,
+      maxParticipants: room.maxParticipants,
+      channelId: room.channelId || room.roomId,
+      serverId: room.serverId,
+      state: 'ringing',
+      timestamp: Date.now(),
+    };
+
+    wsService.send({
+      type: 'call_invite',
+      channelId: event.channelId || event.conversationId,
+      userId: params.targetUser.id,
+      username: params.caller.username,
+      callData: { type: 'call_invite', ...event },
+    });
+    this.persistIncomingCallNotification(event);
     return event;
   }
 
@@ -217,6 +248,12 @@ class CallSignalingService {
       conversationId,
       callerId,
       targetUserId: baseEvent.targetUserId || user?.id,
+      callType: baseEvent.callType,
+      roomType: baseEvent.roomType,
+      roomName: baseEvent.roomName,
+      maxParticipants: baseEvent.maxParticipants,
+      channelId: baseEvent.channelId || conversationId,
+      serverId: baseEvent.serverId,
     };
 
     this.broadcastLocal(payload);
@@ -225,23 +262,8 @@ class CallSignalingService {
       type: 'call_accept',
       channelId: conversationId,
       userId: callerId,
-      callData: { callId, state: 'accepted', callerId, conversationId },
+      callData: payload,
     });
-
-    if (callerId && user?.id && callerId !== user.id) {
-      pbService
-        .addNotificationToUser(callerId, {
-          id: `signal_${Date.now()}`,
-          type: 'system',
-          sender_id: user.id,
-          sender_name: user.display_name || user.username,
-          channel_id: conversationId,
-          message_content: `CALL_SIGNAL:${JSON.stringify(payload)}`,
-          created: new Date().toISOString(),
-          read: false,
-        })
-        .catch(() => {});
-    }
 
     this.notify(this.activeCallEvent);
   }
@@ -257,12 +279,7 @@ class CallSignalingService {
     this.clearTimeoutTimer();
     stopAllRingtones();
 
-    const user = this.getCurrentUser();
     const currentEvent = { ...baseEvent, state };
-    const counterpartId =
-      currentEvent.callerId === user?.id
-        ? currentEvent.targetUserId || currentEvent.targetUser?.id
-        : currentEvent.callerId;
 
     const payload = {
       type: 'call_decline',
@@ -280,21 +297,6 @@ class CallSignalingService {
       callData: { callId, state },
     });
 
-    if (counterpartId && user?.id && counterpartId !== user.id) {
-      pbService
-        .addNotificationToUser(counterpartId, {
-          id: `signal_${Date.now()}`,
-          type: 'system',
-          sender_id: user.id,
-          sender_name: user.display_name || user.username,
-          channel_id: currentEvent.conversationId,
-          message_content: `CALL_SIGNAL:${JSON.stringify(payload)}`,
-          created: new Date().toISOString(),
-          read: false,
-        })
-        .catch(() => {});
-    }
-
     this.notify(currentEvent);
     this.activeCallEvent = null;
   }
@@ -310,12 +312,7 @@ class CallSignalingService {
     this.clearTimeoutTimer();
     stopAllRingtones();
 
-    const user = this.getCurrentUser();
     const currentEvent = { ...baseEvent, state };
-    const counterpartId =
-      currentEvent.callerId === user?.id
-        ? currentEvent.targetUserId || currentEvent.targetUser?.id
-        : currentEvent.callerId;
 
     const payload = {
       type: 'call_cancel',
@@ -332,21 +329,6 @@ class CallSignalingService {
       callData: { callId, state },
     });
 
-    if (counterpartId && user?.id && counterpartId !== user.id) {
-      pbService
-        .addNotificationToUser(counterpartId, {
-          id: `signal_${Date.now()}`,
-          type: 'system',
-          sender_id: user.id,
-          sender_name: user.display_name || user.username,
-          channel_id: currentEvent.conversationId,
-          message_content: `CALL_SIGNAL:${JSON.stringify(payload)}`,
-          created: new Date().toISOString(),
-          read: false,
-        })
-        .catch(() => {});
-    }
-
     this.notify(currentEvent);
     this.activeCallEvent = null;
   }
@@ -356,17 +338,12 @@ class CallSignalingService {
     this.clearTimeoutTimer();
     stopAllRingtones();
 
-    const user = this.getCurrentUser();
     const currentEvent = this.activeCallEvent
       ? { ...this.activeCallEvent, state: 'ended' as CallSignalingState }
       : fallbackEvent
       ? { ...fallbackEvent, state: 'ended' as CallSignalingState }
       : ({ callId, state: 'ended' as CallSignalingState, conversationId: '' } as any);
 
-    const counterpartId =
-      currentEvent.callerId === user?.id
-        ? currentEvent.targetUserId || currentEvent.targetUser?.id
-        : currentEvent.callerId;
 
     const payload = {
       type: 'call_end',
@@ -382,21 +359,6 @@ class CallSignalingService {
       channelId: currentEvent.conversationId,
       callData: { callId, state: 'ended' },
     });
-
-    if (counterpartId && user?.id && counterpartId !== user.id) {
-      pbService
-        .addNotificationToUser(counterpartId, {
-          id: `signal_${Date.now()}`,
-          type: 'system',
-          sender_id: user.id,
-          sender_name: user.display_name || user.username,
-          channel_id: currentEvent.conversationId,
-          message_content: `CALL_SIGNAL:${JSON.stringify(payload)}`,
-          created: new Date().toISOString(),
-          read: false,
-        })
-        .catch(() => {});
-    }
 
     this.notify(currentEvent);
     this.activeCallEvent = null;
@@ -506,6 +468,11 @@ class CallSignalingService {
         targetUserId: user.id,
         callType: data.callType || 'voice',
         conversationId: data.conversationId,
+        roomType: data.roomType,
+        roomName: data.roomName,
+        maxParticipants: data.maxParticipants,
+        channelId: data.channelId || data.conversationId,
+        serverId: data.serverId,
         state: 'ringing',
         timestamp: data.timestamp || Date.now(),
       };
@@ -566,6 +533,11 @@ class CallSignalingService {
           targetUserId: user.id,
           callType: data.callType || 'voice',
           conversationId: data.conversationId,
+          roomType: data.roomType,
+          roomName: data.roomName,
+          maxParticipants: data.maxParticipants,
+          channelId: data.channelId || data.conversationId,
+          serverId: data.serverId,
           state: 'ringing',
           timestamp: data.timestamp || Date.now(),
         };
@@ -607,6 +579,11 @@ class CallSignalingService {
             targetUserId: user.id,
             callType: data?.callType || 'voice',
             conversationId: evt.channelId || data?.conversationId || '',
+            roomType: data?.roomType,
+            roomName: data?.roomName,
+            maxParticipants: data?.maxParticipants,
+            channelId: data?.channelId || evt.channelId || data?.conversationId || '',
+            serverId: data?.serverId,
             state: 'accepted',
             timestamp: Date.now(),
           });
@@ -649,6 +626,27 @@ class CallSignalingService {
       clearTimeout(this.outgoingSoundTimer);
       this.outgoingSoundTimer = null;
     }
+  }
+
+  private persistIncomingCallNotification(event: IncomingCallEvent): void {
+    const targetUserId = event.targetUserId || event.targetUser?.id;
+    if (!targetUserId || targetUserId === event.callerId) return;
+    pbService
+      .addNotificationToUser(targetUserId, {
+        id: `call_${event.callId}`,
+        type: 'system',
+        sender_id: event.callerId,
+        sender_name: event.callerName,
+        sender_avatar: event.callerAvatar,
+        channel_id: event.channelId || event.conversationId,
+        server_id: event.serverId,
+        message_content: `INCOMING_CALL:${JSON.stringify(event)}`,
+        created: new Date().toISOString(),
+        read: false,
+      })
+      .catch((e) => {
+        console.warn('Call notification dispatch warning:', e);
+      });
   }
 
   private clearTimeoutTimer() {

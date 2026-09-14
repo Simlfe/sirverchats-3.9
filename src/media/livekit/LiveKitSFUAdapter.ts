@@ -6,6 +6,7 @@ import {
   MediaConnectionState,
   SFUAdapterEvent,
   CameraPublishOptions,
+  AudioOutputRoute,
 } from '../../types/media';
 import liveKitManager from './LiveKitManager';
 
@@ -83,6 +84,14 @@ export class LiveKitSFUAdapter implements SFUProviderAdapter {
 
   public setDeafened(deafened: boolean): void {
     liveKitManager.setDeafened(deafened);
+  }
+
+  public setAudioOutputRoute(route: AudioOutputRoute): Promise<boolean> {
+    return liveKitManager.setAudioOutputRoute(route);
+  }
+
+  public getAudioOutputRoute(): AudioOutputRoute {
+    return liveKitManager.getAudioOutputRoute();
   }
 
   public getConnectionState(): MediaConnectionState {

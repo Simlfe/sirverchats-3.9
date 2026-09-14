@@ -2,6 +2,11 @@ import { User } from '../types';
 
 export type MediaCommunicationType = 'dm_call' | 'voice_room';
 
+/** Preferred output route for remote voice audio. Native shells may map these
+ * values to a phone speaker/receiver; browsers use setSinkId when available
+ * and otherwise leave routing to the operating system. */
+export type AudioOutputRoute = 'default' | 'speaker' | 'earpiece';
+
 export type MediaConnectionState =
   | 'idle'
   | 'joining'
@@ -70,7 +75,12 @@ export interface IncomingCallEvent {
   targetUser?: User;
   targetUserId?: string;
   callType: 'voice' | 'video';
-  conversationId: string; // DM channel ID
+  conversationId: string; // DM channel ID or voice channel ID
+  roomType?: MediaCommunicationType;
+  roomName?: string;
+  maxParticipants?: number;
+  channelId?: string;
+  serverId?: string;
   state: CallSignalingState;
   timestamp: number;
 }

@@ -26,6 +26,7 @@ import {
   MediaError,
   CameraPublishOptions,
   ParticipantDiagnosticsData,
+  AudioOutputRoute,
 } from '../../types/media';
 import { getServerMemberAvatarUrl, getServerMemberDisplayName, pbService } from '../../pocketbase';
 import ENDPOINTS from '../../config/endpoints';
@@ -81,6 +82,8 @@ export class LiveKitManager {
   private connectionState: MediaConnectionState = 'idle';
   private listeners: Set<(event: SFUAdapterEvent) => void> = new Set();
   private attachedAudioElements: Map<string, { el: HTMLMediaElement; source: 'voice' | 'screen'; userId: string }> = new Map();
+  private audioOutputRoute: AudioOutputRoute = 'default';
+  private audioOutputDeviceIds: Record<'speaker' | 'earpiece', string | null> = { speaker: null, earpiece: null };
   private participants: Map<string, MediaParticipant> = new Map();
   private isDeafened: boolean = false;
   private currentFacingMode: 'user' | 'environment' = 'user';
@@ -150,6 +153,17 @@ export class LiveKitManager {
     try {
       setLogLevel('warn');
     } catch (e) {}
+    try {
+      if (typeof localStorage !== 'undefined') {
+        const savedRoute = localStorage.getItem('sirver_audio_output_route');
+        if (savedRoute === 'default' || savedRoute === 'speaker' || savedRoute === 'earpiece') {
+          this.audioOutputRoute = savedRoute;
+        }
+        const legacyOutput = localStorage.getItem('sirver_audio_output_device');
+        this.audioOutputDeviceIds.speaker = localStorage.getItem('sirver_audio_output_device_speaker') || legacyOutput;
+        this.audioOutputDeviceIds.earpiece = localStorage.getItem('sirver_audio_output_device_earpiece') || null;
+      }
+    } catch {}
     this.startTokenRefreshTimer();
     audioMixer.subscribe(() => {
       this.updateAllAudioElementVolumes();
@@ -1060,6 +1074,119 @@ export class LiveKitManager {
     this.updateAllAudioElementVolumes();
   }
 
+  public getAudioOutputRoute(): AudioOutputRoute {
+    return this.audioOutputRoute;
+  }
+
+  /**
+   * Apply a friendly speaker/receiver preference across every remote audio
+   * element. Capacitor shells can expose an optional AudioRoute plugin; web
+   * browsers use the standards-based setSinkId API when it is available.
+   * Phones that do not expose either API keep the route preference visible and
+   * let the operating system's call audio policy choose the physical output.
+   */
+  public async setAudioOutputRoute(route: AudioOutputRoute): Promise<boolean> {
+    this.audioOutputRoute = route;
+    try {
+      if (typeof localStorage !== 'undefined') {
+        localStorage.setItem('sirver_audio_output_route', route);
+      }
+    } catch {}
+
+    let applied = false;
+
+    // Optional native bridge. It is intentionally feature-detected so legacy
+    // Capacitor/Tauri builds continue to work without a native plugin.
+    try {
+      const nativePlugins = (globalThis as any)?.Capacitor?.Plugins;
+      const audioRoutePlugin = nativePlugins?.AudioRoute;
+      if (audioRoutePlugin && typeof audioRoutePlugin.setRoute === 'function') {
+        await audioRoutePlugin.setRoute({ route });
+        applied = true;
+      }
+    } catch (err) {
+      console.debug('[LiveKitManager] Native audio route bridge unavailable:', err);
+    }
+
+    const sinkId = route === 'default' ? '' : await this.resolveAudioSink(route);
+    if (sinkId !== null) {
+      if (sinkId) {
+        if (route === 'speaker' || route === 'earpiece') this.audioOutputDeviceIds[route] = sinkId;
+        try {
+          if (typeof localStorage !== 'undefined') {
+            localStorage.setItem('sirver_audio_output_device', sinkId);
+            localStorage.setItem(`sirver_audio_output_device_${route}`, sinkId);
+          }
+        } catch {}
+      }
+      for (const { el } of this.attachedAudioElements.values()) {
+        const setSinkId = (el as HTMLMediaElement & { setSinkId?: (id: string) => Promise<void> }).setSinkId;
+        if (typeof setSinkId === 'function') {
+          try {
+            await setSinkId.call(el, sinkId);
+            applied = true;
+          } catch (err) {
+            console.debug('[LiveKitManager] Could not apply audio output sink:', err);
+          }
+        }
+      }
+    }
+
+    // audioSession is supported by some mobile WebViews. It cannot select a
+    // named device, but setting the playback mode improves speaker behavior.
+    try {
+      const audioSession = (navigator as any)?.audioSession;
+      if (audioSession && 'type' in audioSession) {
+        audioSession.type = route === 'earpiece' ? 'play-and-record' : 'playback';
+        applied = true;
+      }
+    } catch {}
+
+    this.updateAllAudioElementVolumes();
+    return route === 'default' || applied;
+  }
+
+  private async resolveAudioSink(route: Exclude<AudioOutputRoute, 'default'>): Promise<string | null> {
+    if (typeof navigator === 'undefined' || !navigator.mediaDevices) return null;
+    const savedDeviceId = this.audioOutputDeviceIds[route];
+    if (savedDeviceId) return savedDeviceId;
+
+    try {
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      const outputs = devices.filter((device) => device.kind === 'audiooutput');
+      const pattern = route === 'speaker' ? /speaker|built.?in|default|communications/i : /earpiece|receiver|phone|handset/i;
+      const preferred = outputs.find((device) => pattern.test(device.label));
+      if (preferred?.deviceId) return preferred.deviceId;
+    } catch {}
+
+    // selectAudioOutput is permission-gated and must only be reached from a
+    // user-initiated route button. It is absent on most mobile browsers.
+    try {
+      const selectAudioOutput = (navigator.mediaDevices as any).selectAudioOutput;
+      if (typeof selectAudioOutput === 'function') {
+        const selected = await selectAudioOutput.call(navigator.mediaDevices);
+        if (selected?.deviceId) return selected.deviceId;
+      }
+    } catch (err) {
+      console.debug('[LiveKitManager] Audio output chooser unavailable:', err);
+    }
+    return null;
+  }
+
+  private async applySavedAudioOutput(el: HTMLMediaElement): Promise<void> {
+    const setSinkId = (el as HTMLMediaElement & { setSinkId?: (id: string) => Promise<void> }).setSinkId;
+    if (typeof setSinkId !== 'function') return;
+    const sinkId = this.audioOutputRoute === 'default'
+      ? ''
+      : this.audioOutputDeviceIds[this.audioOutputRoute];
+    if (sinkId === null) return;
+    try {
+      await setSinkId.call(el, sinkId);
+    } catch (err) {
+      console.debug('[LiveKitManager] Saved audio output could not be applied:', err);
+    }
+  }
+
   public setFacingMode(mode: 'user' | 'environment'): void {
     this.currentFacingMode = mode;
   }
@@ -1283,6 +1410,7 @@ export class LiveKitManager {
         const el = track.attach();
         el.autoplay = true;
         el.volume = 1.0;
+        void this.applySavedAudioOutput(el);
         el.play().catch((playErr) => {
           console.warn('[LiveKitManager] Audio element play error:', playErr);
         });
