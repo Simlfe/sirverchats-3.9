@@ -1029,7 +1029,7 @@ Adaptive Bitrate Monitor     : Running (monitoring packet loss & network through
         if (conn) {
           const downlink = typeof conn.downlink === 'number' ? conn.downlink : 5.0;
           if (downlink < 1.0 && this.cameraTelemetry.activeProfile !== 'low') {
-            const reason = `Network downlink speed dropped to ${downlink} Mbps. Auto-downgrading active profile from ${this.cameraTelemetry.activeProfile.toUpperCase()} to LOW.`;
+            const reason = `Network downlink speed dropped to ${downlink} Mbps. LiveKit is adapting bitrate while keeping the selected ${this.cameraTelemetry.activeProfile.toUpperCase()} profile.`;
             console.warn(`[CAMERA_PIPELINE] ${reason}`);
             this.cameraTelemetry.lastDowngradeReason = reason;
             this.cameraTelemetry.adaptiveBitrateState = `Degraded (${downlink} Mbps)`;
