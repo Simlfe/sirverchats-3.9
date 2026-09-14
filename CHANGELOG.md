@@ -1,5 +1,13 @@
 # Sirver Application Changelog
 
+## [3.9-production-source] - 2026-09-14
+### Production Web Source and Deployment Readiness
+- Made `Simlfe/sirverchats-3.9` the maintained source for the SirverChats web application.
+- Repaired and synchronized `package-lock.json` so clean `npm ci` installs and Cloudflare Pages builds are reproducible.
+- Pinned the PocketBase JavaScript client to `0.21.5`, matching the production PocketBase 0.22 server line, and updated authenticated-record access for that SDK.
+- Added Cloudflare Pages deployment validation, SPA routing fallback, immutable hashed-asset caching, and HTML revalidation rules.
+- Kept deployment manual until the Cloudflare credentials are configured in this repository, preventing a failed automatic production run.
+
 ## [4.60.63] - 2026-09-07
 ### Automatic Rollback & Safe Fallback for Deleted / Faulty Releases
 - **Faulty Version Deletion & Auto-Rollback Engine (`src/services/updateService.ts`)**:

@@ -2620,7 +2620,7 @@ class PocketBaseService {
     }
 
     const record = await this.pb.collection('users').update(userId, formData);
-    if (this.pb.authStore.record && this.pb.authStore.record.id === userId) {
+    if (this.pb.authStore.model && this.pb.authStore.model.id === userId) {
       this.pb.authStore.save(this.pb.authStore.token, record);
     }
     return record as any as User;
