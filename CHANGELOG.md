@@ -1,5 +1,13 @@
 # Sirver Application Changelog
 
+## [3.9-update-ui] - 2026-09-14
+### Non-Intrusive Update Status
+- Removed the automatic "Update Ready to Install" notification toast and the
+  floating "Update Ready to Apply" banner so update readiness no longer covers
+  or interrupts the chat interface.
+- Kept updater state and controls available inside the manual Updates settings
+  page, including mandatory-update handling.
+
 ## [3.9-production-source] - 2026-09-14
 ### Production Web Source and Deployment Readiness
 - Made `Simlfe/sirverchats-3.9` the maintained source for the SirverChats web application.

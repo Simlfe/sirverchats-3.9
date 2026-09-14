@@ -3,7 +3,7 @@ import { AnimatePresence, motion } from 'motion/react';
 import { pbService, mergeUserRecord } from './pocketbase';
 import { MessageDeletionService } from './services/messageDeletionService';
 import { getLanguageDictionary } from './services/localization';
-import { Bell, RefreshCw, Volume2, CheckCircle, AlertTriangle, RotateCcw, Download, Sparkles } from 'lucide-react';
+import { Bell, RefreshCw, Volume2, AlertTriangle, RotateCcw, Download, Sparkles } from 'lucide-react';
 import { App as CapApp } from '@capacitor/app';
 import { User, Server, Channel, Message, Attachment, Translation, AppLanguageConfig, MusicTrack, NotificationItem, UnreadChannelInfo, Call } from './types';
 import { sendInAppNotification, requestNotificationPermission } from './lib/notifications';
@@ -738,29 +738,16 @@ export default function App() {
     };
   }, []);
 
-  // Update Service state subscription and toast alert
+  // Keep updater state available for the manual settings screen without
+  // interrupting chat with automatic "ready to apply" notifications.
   const [updateState, setUpdateState] = useState<UpdateState>(() => updateService.getState());
 
   useEffect(() => {
     const unsubscribe = updateService.subscribe((state) => {
       setUpdateState(state);
-      if (state.status === 'downloaded' && state.availableUpdate) {
-        setActiveToast({
-          id: `update_ready_${state.availableUpdate.version}`,
-          title: lang === 'ar' ? 'تحديث جديد جاهز للتثبيت! 🚀' : 'Update Ready to Install! 🚀',
-          message: lang === 'ar'
-            ? `تم تنزيل إطلاق SirverData v${state.availableUpdate.version}. انقر هنا لإعادة التشغيل والتثبيت.`
-            : `SirverData release v${state.availableUpdate.version} was downloaded. Click to restart & install.`,
-          avatar: '',
-          channelName: lang === 'ar' ? 'التحديثات' : 'Updates',
-          onClick: () => {
-            setShowSettings(true);
-          },
-        });
-      }
     });
     return unsubscribe;
-  }, [lang]);
+  }, []);
 
   // 1. Restore Auth Session on load & perform background update check
   useEffect(() => {
@@ -4596,33 +4583,6 @@ export default function App() {
                 </motion.div>
               )}
 
-              {/* 4. Update Ready to Restart Floating Action Toast */}
-              {updateState.status === 'ready_to_restart' && !updateState.mandatory && (
-                <motion.div
-                  initial={{ opacity: 0, y: -20, scale: 0.95 }}
-                  animate={{ opacity: 1, y: 0, scale: 1 }}
-                  exit={{ opacity: 0, y: -20, scale: 0.95 }}
-                  className="fixed top-12 right-6 z-[105] p-3.5 rounded-2xl bg-emerald-950/90 text-white border border-emerald-500/50 shadow-2xl backdrop-blur-md flex items-center gap-3 max-w-sm"
-                >
-                  <div className="w-8 h-8 rounded-xl bg-emerald-500/20 flex items-center justify-center text-emerald-400 shrink-0">
-                    <CheckCircle className="w-4 h-4" />
-                  </div>
-                  <div className="flex-1 min-w-0 text-left">
-                    <div className="text-xs font-black text-emerald-300">
-                      {lang === 'ar' ? 'تحديث داخلي جاهز!' : 'Update Ready to Apply!'}
-                    </div>
-                    <div className="text-[10px] text-slate-300 truncate">
-                      {lang === 'ar' ? 'أعد التشغيل لتطبيق التحديث فوراً' : 'Restart now to run the new version'}
-                    </div>
-                  </div>
-                  <button
-                    onClick={() => updateService.installUpdate()}
-                    className="px-3 py-1.5 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-white font-black text-[11px] cursor-pointer shadow-md transition-all border-0 shrink-0"
-                  >
-                    {lang === 'ar' ? 'إعادة التشغيل' : 'Restart'}
-                  </button>
-                </motion.div>
-              )}
             </AnimatePresence>
 
             {/* Mandatory Update Required Overlay Modal */}
