@@ -182,6 +182,7 @@ class NotificationService {
     // Ephemeral call signaling is handled directly by CallSignalingService & FloatingCallWindow UI
     if (
       notif.message_content?.includes('INCOMING_CALL:') ||
+      notif.message_content?.includes('CALL_SIGNAL:') ||
       (notif.id?.startsWith('call_') && !notif.message_content?.includes('[CALL_LOG:'))
     ) {
       return;

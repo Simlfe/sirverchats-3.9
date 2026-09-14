@@ -304,6 +304,16 @@ export const MediaProvider: React.FC<{
 
           if (isCaller && activeUser) {
             setOutgoingCall(null);
+
+            // A voice-room invite is an acknowledgement from another
+            // participant, not a request to reconnect the caller. Keeping the
+            // existing LiveKit session preserves participants and duration.
+            const existingRoom = activeRoomRef.current;
+            if (event.roomType === 'voice_room' && existingRoom?.roomType === 'voice_room' && existingRoom.roomId === event.conversationId) {
+              setParticipants(realtimeMediaProvider.getParticipants());
+              return;
+            }
+
             const targetUser = activeOutgoing?.targetUser || event.targetUser;
             const config: RoomConfig = {
               roomId: event.conversationId,
