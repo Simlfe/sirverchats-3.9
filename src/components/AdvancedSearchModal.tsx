@@ -289,8 +289,20 @@ export default function AdvancedSearchModal({
 
         const channelMatches = await Promise.all(searchChannels.map(async (chan) => {
           try {
-            const list = await pbService.fetchMessages(chan.id, 1, 100);
-            return list.items.flatMap((msg): Message[] => {
+            const isDm = currentChannel.server === 'dm' || currentChannel.name.startsWith('@') || currentChannel.id.startsWith('dm-');
+            let messagesForChannel: Message[];
+            if (isDm) {
+              const recipientId = currentChannel.recipientUser?.id || currentChannel.recipientId;
+              if (!recipientId) return [];
+              const chatServerId = currentChannel.id.startsWith('dm-server-')
+                ? currentChannel.id.replace(/^dm-server-/, '')
+                : undefined;
+              messagesForChannel = await pbService.fetchDirectMessages(recipientId, chatServerId, false);
+            } else {
+              const list = await pbService.fetchMessages(chan.id, 1, 100);
+              messagesForChannel = list.items;
+            }
+            return messagesForChannel.flatMap((msg): Message[] => {
               if (msg.deleted || msg.deleted_at) return [];
 
               // Text query matching
