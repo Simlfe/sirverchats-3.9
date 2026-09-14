@@ -115,6 +115,8 @@ export class LiveKitManager {
 
   // Cached authentication tokens (key: `${roomName}:${identity}`)
   private tokenCache: Map<string, CachedToken> = new Map();
+  // Coalesce simultaneous joins/prefetches for the same room and identity.
+  private pendingTokenRequests: Map<string, Promise<string>> = new Map();
 
   // Cached audio track
   private cachedAudioTrack: LocalAudioTrack | null = null;
@@ -139,6 +141,7 @@ export class LiveKitManager {
 
   // Background token refresh timer
   private tokenRefreshTimer: ReturnType<typeof setInterval> | null = null;
+  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 
   private sfuUrl: string = LIVEKIT_DEFAULT_URL;
   private tokenEndpoint: string = LIVEKIT_TOKEN_ENDPOINT;
@@ -197,10 +200,27 @@ export class LiveKitManager {
     return null;
   }
 
+  private getAuthHeader(): string | undefined {
+    try {
+      const sessionToken = pbService.getPbInstance()?.authStore?.token;
+      // The gateway authenticates with the existing PocketBase session. A
+      // configured token is only a fallback for non-PocketBase integrations.
+      const token = sessionToken || this.config?.authToken;
+      if (!token) return undefined;
+      return token.startsWith('Bearer ') ? token : `Bearer ${token}`;
+    } catch {
+      return undefined;
+    }
+  }
+
   /**
-   * Requests a JWT token from backend endpoint with fallback proxy, or returns cached token if valid.
+   * Requests a JWT token from the authenticated gateway, or returns a cached
+   * token if valid. Production uses the absolute gateway endpoint directly;
+   * the relative proxy is only a local/chat-host fallback.
    */
   public async getToken(identity: string, name: string, roomName: string, forceRefresh: boolean = false): Promise<string> {
+    const key = `${roomName}:${identity}`;
+
     if (!forceRefresh) {
       const cachedToken = this.getCachedToken(roomName, identity);
       if (cachedToken) {
@@ -208,71 +228,99 @@ export class LiveKitManager {
       }
     }
 
-    const defaultEndpoint = ENDPOINTS.LIVEKIT_TOKEN_ENDPOINT;
-
-    const isDifferentOrigin = typeof window !== 'undefined' && !window.location.origin.includes('chat.sirverdata.top');
-    const endpointsToTry = isDifferentOrigin
-      ? ['/livekit/token', defaultEndpoint]
-      : [defaultEndpoint, '/livekit/token'];
-
-    let lastError: Error | null = null;
-
-    for (const endpoint of endpointsToTry) {
-      console.log(`[LiveKitManager] Requesting LiveKit token for identity: "${identity}", name: "${name}", room: "${roomName}" at endpoint: ${endpoint}`);
-      const startTime = Date.now();
-      try {
-        const response = await fetch(endpoint, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            identity,
-            name,
-            room: roomName,
-          }),
-        });
-
-        const duration = Date.now() - startTime;
-        if (!response.ok) {
-          const errorText = await response.text().catch(() => '');
-          throw new Error(`HTTP ${response.status} (${response.statusText}): ${errorText || 'No error message'}`);
-        }
-
-        let data: TokenResponse;
-        try {
-          data = await response.json();
-        } catch (jsonErr: any) {
-          throw new Error(`Failed to parse token response JSON from ${endpoint}`);
-        }
-
-        if (!data.token) {
-          throw new Error(data.error || `Token response from ${endpoint} missing token field`);
-        }
-
-        const expMs = parseJwtExp(data.token);
-        const expiresAt = expMs || (Date.now() + 12 * 60 * 60 * 1000); // 12 hours fallback
-        const cacheEntry: CachedToken = {
-          token: data.token,
-          roomName,
-          identity,
-          expiresAt,
-          fetchedAt: Date.now(),
-        };
-
-        const key = `${roomName}:${identity}`;
-        this.tokenCache.set(key, cacheEntry);
-        console.log(`[LiveKitManager] Cached token successfully for "${identity}" in room "${roomName}" (took ${duration}ms, expires in ${Math.round((expiresAt - Date.now()) / 1000)}s)`);
-
-        return data.token;
-      } catch (err: any) {
-        const duration = Date.now() - startTime;
-        console.warn(`[LiveKitManager] Token request to ${endpoint} failed after ${duration}ms:`, err?.message || err);
-        lastError = err instanceof Error ? err : new Error(String(err));
-      }
+    const pending = this.pendingTokenRequests.get(key);
+    if (pending) {
+      return pending;
     }
 
-    throw new Error(`Token request failure at ${defaultEndpoint}: ${lastError?.message || 'Unknown network error'}`);
+    const request = (async () => {
+      const defaultEndpoint = ENDPOINTS.LIVEKIT_TOKEN_ENDPOINT;
+      const primaryEndpoint = this.tokenEndpoint || defaultEndpoint;
+      const endpointsToTry = [primaryEndpoint];
+      const host = typeof window !== 'undefined' ? window.location.hostname : '';
+      const isLocalOrChatHost = host === 'localhost' || host === '127.0.0.1' || host === '::1' || host.endsWith('chat.sirverdata.top');
+      if (isLocalOrChatHost && !endpointsToTry.includes('/livekit/token')) {
+        endpointsToTry.push('/livekit/token');
+      }
+
+      let lastError: Error | null = null;
+      const authHeader = this.getAuthHeader();
+
+      for (const endpoint of endpointsToTry) {
+        console.log(`[LiveKitManager] Requesting LiveKit token for identity: "${identity}", name: "${name}", room: "${roomName}" at endpoint: ${endpoint}`);
+        const startTime = Date.now();
+        const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+        const timeoutId = controller ? setTimeout(() => controller.abort(), 10_000) : null;
+        try {
+          const headers: Record<string, string> = {
+            'Content-Type': 'application/json',
+          };
+          if (authHeader) {
+            headers.Authorization = authHeader;
+          }
+
+          const response = await fetch(endpoint, {
+            method: 'POST',
+            headers,
+            signal: controller?.signal,
+            body: JSON.stringify({
+              identity,
+              name,
+              room: roomName,
+            }),
+          });
+
+          const duration = Date.now() - startTime;
+          if (!response.ok) {
+            const errorText = await response.text().catch(() => '');
+            throw new Error(`HTTP ${response.status} (${response.statusText}): ${errorText || 'No error message'}`);
+          }
+
+          let data: TokenResponse;
+          try {
+            data = await response.json();
+          } catch {
+            throw new Error(`Failed to parse token response JSON from ${endpoint}`);
+          }
+
+          if (!data.token) {
+            throw new Error(data.error || `Token response from ${endpoint} missing token field`);
+          }
+
+          const expMs = parseJwtExp(data.token);
+          const expiresAt = expMs || (Date.now() + 12 * 60 * 60 * 1000); // 12 hours fallback
+          const cacheEntry: CachedToken = {
+            token: data.token,
+            roomName,
+            identity,
+            expiresAt,
+            fetchedAt: Date.now(),
+          };
+
+          this.tokenCache.set(key, cacheEntry);
+          console.log(`[LiveKitManager] Cached token successfully for "${identity}" in room "${roomName}" (took ${duration}ms, expires in ${Math.round((expiresAt - Date.now()) / 1000)}s)`);
+
+          return data.token;
+        } catch (err: any) {
+          const duration = Date.now() - startTime;
+          console.warn(`[LiveKitManager] Token request to ${endpoint} failed after ${duration}ms:`, err?.message || err);
+          lastError = err instanceof Error ? err : new Error(String(err));
+        } finally {
+          if (timeoutId) clearTimeout(timeoutId);
+        }
+      }
+
+      throw new Error(`Token request failure at ${primaryEndpoint}: ${lastError?.message || 'Unknown network error'}`);
+    })();
+
+    this.pendingTokenRequests.set(key, request);
+    try {
+      return await request;
+    } finally {
+      if (this.pendingTokenRequests.get(key) === request) {
+        this.pendingTokenRequests.delete(key);
+      }
+    }
   }
 
   /**
@@ -306,6 +354,11 @@ export class LiveKitManager {
    * Joins a LiveKit room. Reuses existing connected Room if already connected to the same room!
    */
   public async joinRoom(roomConfig: RoomConfig): Promise<void> {
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+
     if (this.isJoiningPromise) {
       if (this.currentRoomConfig?.roomId === roomConfig.roomId) {
         console.log('[LiveKitManager] Join already in progress for room:', roomConfig.roomId);
@@ -322,13 +375,29 @@ export class LiveKitManager {
       const roomName = this.getRoomName(roomConfig);
 
       // Rule: Never create a new Room if already connected to the same room!
-      if (this.room && (this.room.state === LiveKitConnectionState.Connected || this.room.state === LiveKitConnectionState.Connecting) && this.currentRoomConfig?.roomId === roomConfig.roomId) {
+      if (
+        this.room &&
+        (this.room.state === LiveKitConnectionState.Connected ||
+          this.room.state === LiveKitConnectionState.Connecting ||
+          this.room.state === LiveKitConnectionState.Reconnecting) &&
+        this.currentRoomConfig?.roomId === roomConfig.roomId
+      ) {
         console.log('[LiveKitManager] Already connected/connecting to room:', roomConfig.roomId, '- Reusing active Room instance.');
         this.isExplicitlyJoined = true;
         this.currentRoomConfig = roomConfig;
-        this.setConnectionState('connected');
+        this.setConnectionState(this.room.state === LiveKitConnectionState.Reconnecting ? 'reconnecting' : this.room.state === LiveKitConnectionState.Connecting ? 'connecting' : 'connected');
         this.syncAllParticipants();
         return;
+      }
+
+      // A terminally disconnected Room cannot be connected again reliably;
+      // create a fresh instance while preserving the requested room config.
+      if (this.room && this.currentRoomConfig?.roomId === roomConfig.roomId && this.room.state === LiveKitConnectionState.Disconnected) {
+        try {
+          this.room.removeAllListeners();
+          await this.room.disconnect(true);
+        } catch {}
+        this.room = null;
       }
 
       // If connected to a different room, disconnect previous room explicitly
@@ -347,6 +416,7 @@ export class LiveKitManager {
         getServerMemberDisplayName(member, roomConfig.user, roomConfig.serverId) ||
         roomConfig.user.display_name ||
         roomConfig.user.username;
+      const wasPreviouslyConnected = this.wasConnected;
 
       // Step 1: Request or fetch cached JWT token (Immediate & Early)
       let token: string;
@@ -359,7 +429,15 @@ export class LiveKitManager {
           message: tokenErr?.message || 'Token acquisition failure',
           details: tokenErr,
         };
-        this.setConnectionState('failed');
+        if (wasPreviouslyConnected) {
+          this.currentRoomConfig = roomConfig;
+          this.setConnectionState('reconnecting');
+        } else {
+          this.isExplicitlyJoined = false;
+          this.wasConnected = false;
+          this.currentRoomConfig = null;
+          this.setConnectionState('failed');
+        }
         this.emit({ type: 'error', error: mediaErr });
         throw new Error(mediaErr.message);
       }
@@ -394,11 +472,10 @@ export class LiveKitManager {
         this.syncAllParticipants();
       } catch (connErr: any) {
         console.warn('[LiveKitManager] LiveKit connection attempt failed:', connErr?.message || connErr);
-        this.isExplicitlyJoined = false;
-        this.wasConnected = false;
-        this.currentRoomConfig = null;
+        const shouldKeepSessionForReconnect = wasPreviouslyConnected && this.isExplicitlyJoined && this.currentRoomConfig?.roomId === roomConfig.roomId;
         if (this.room) {
           try {
+            this.room.removeAllListeners();
             await this.room.disconnect(true);
           } catch (e) {}
           this.room = null;
@@ -411,8 +488,17 @@ export class LiveKitManager {
           connErr?.message?.includes('Client initiated disconnect');
         if (isAbort) {
           console.warn('[LiveKitManager] Connection attempt was cancelled/aborted:', connErr?.message);
-          if (this.currentRoomConfig?.roomId === roomConfig.roomId) {
-            this.setConnectionState('disconnected');
+          if (shouldKeepSessionForReconnect) {
+            this.currentRoomConfig = roomConfig;
+            this.wasConnected = true;
+            this.setConnectionState('reconnecting');
+          } else {
+            this.isExplicitlyJoined = false;
+            this.wasConnected = false;
+            if (this.currentRoomConfig?.roomId === roomConfig.roomId) {
+              this.currentRoomConfig = null;
+              this.setConnectionState('disconnected');
+            }
           }
           return;
         }
@@ -422,7 +508,18 @@ export class LiveKitManager {
           message: `LiveKit connection failure: ${connErr?.message || 'Failed to connect to LiveKit server'}`,
           details: connErr,
         };
-        this.setConnectionState('failed');
+        if (shouldKeepSessionForReconnect) {
+          this.currentRoomConfig = roomConfig;
+          this.wasConnected = true;
+          this.setConnectionState('reconnecting');
+        } else {
+          this.isExplicitlyJoined = false;
+          this.wasConnected = false;
+          if (this.currentRoomConfig?.roomId === roomConfig.roomId) {
+            this.currentRoomConfig = null;
+          }
+          this.setConnectionState('failed');
+        }
         this.emit({ type: 'error', error: mediaErr });
         throw new Error(mediaErr.message);
       }
@@ -451,6 +548,10 @@ export class LiveKitManager {
     this.wasConnected = false;
     this.currentRoomConfig = null;
     this.reconnectAttempts = 0;
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
 
     if (!this.room) {
       this.setConnectionState('disconnected');
@@ -750,30 +851,17 @@ export class LiveKitManager {
         priority: 'high' as const,
       };
 
-      const simulcastEncodings = enableSimulcast
-        ? [
-            {
-              rid: 'f',
-              maxBitrate,
-              maxFramerate: targetFps,
-              quality: VideoQuality.HIGH,
-            },
-            {
-              rid: 'm',
-              maxBitrate: Math.round(maxBitrate * 0.35),
-              maxFramerate: Math.min(targetFps, 30),
-              scaleResolutionDownBy: 2.0,
-              quality: VideoQuality.MEDIUM,
-            },
-            {
-              rid: 'q',
-              maxBitrate: 150_000,
-              maxFramerate: 15,
-              scaleResolutionDownBy: 4.0,
-              quality: VideoQuality.LOW,
-            },
-          ]
-        : undefined;
+      // Quality changes replace the previous camera publication. Keeping two
+      // camera publications alive lets subscribers select an older, lower
+      // quality track and makes the preset appear inverted.
+      const existingCameraPublications = Array.from(this.room.localParticipant.videoTrackPublications.values()).filter(
+        (publication) => publication.source === Track.Source.Camera && publication.track
+      );
+      for (const publication of existingCameraPublications) {
+        if (publication.track && publication.track.mediaStreamTrack !== track) {
+          await this.room.localParticipant.unpublishTrack(publication.track, false);
+        }
+      }
 
       const pub = await this.room.localParticipant.publishTrack(track, {
         name: 'camera',
@@ -781,12 +869,24 @@ export class LiveKitManager {
         videoCodec: codec,
         videoEncoding,
         simulcast: enableSimulcast,
+        degradationPreference: options?.activeProfile === 'low' ? 'maintain-framerate' : 'balanced',
         dtx: false,
       });
 
       console.log(`[CAMERA_PIPELINE] Camera video track successfully published to SFU! SID: ${pub?.trackSid || 'ok'}`);
     } catch (err) {
       console.warn('[CAMERA_PIPELINE] Failed to publish video track:', err);
+      const mediaErr: MediaError = {
+        code: 'SFU_UNAVAILABLE',
+        message: err instanceof Error ? err.message : 'LiveKit rejected the camera publication',
+        details: err,
+      };
+      this.emit({ type: 'error', error: mediaErr });
+      const publicationError = err instanceof Error ? err : new Error(mediaErr.message);
+      if (publicationError.name === 'Error') {
+        publicationError.name = 'SFU_UNAVAILABLE';
+      }
+      throw publicationError;
     }
   }
 
@@ -796,7 +896,7 @@ export class LiveKitManager {
       const pubs = Array.from(this.room.localParticipant.videoTrackPublications.values());
       for (const pub of pubs) {
         if (pub.track && pub.source === Track.Source.Camera) {
-          await pub.track.mute();
+          await this.room.localParticipant.unpublishTrack(pub.track, false);
         }
       }
     } catch (err) {
@@ -1171,7 +1271,6 @@ export class LiveKitManager {
     if (publication.kind === Track.Kind.Video && publication instanceof RemoteTrackPublication) {
       try {
         publication.setVideoQuality(VideoQuality.HIGH);
-        publication.setVideoFPS(60);
       } catch (e) {}
     }
 
@@ -1261,6 +1360,56 @@ export class LiveKitManager {
       }
       attempt++;
     }
+  }
+
+  private scheduleReconnect(room: Room | null, reason?: unknown): void {
+    if (room && this.room !== room) return;
+    if (!this.isExplicitlyJoined || !this.currentRoomConfig || !this.wasConnected) return;
+    if (this.reconnectTimer) return;
+
+    if (this.reconnectAttempts >= this.maxReconnectAttempts) {
+      const mediaErr: MediaError = {
+        code: 'SFU_UNAVAILABLE',
+        message: 'LiveKit disconnected and could not reconnect.',
+        details: reason,
+      };
+      this.isExplicitlyJoined = false;
+      this.wasConnected = false;
+      this.currentRoomConfig = null;
+      this.setConnectionState('failed');
+      this.emit({ type: 'error', error: mediaErr });
+      return;
+    }
+
+    const reconnectConfig = this.currentRoomConfig;
+    const attempt = ++this.reconnectAttempts;
+    const backoffMs = Math.min(8_000, 750 * Math.pow(2, attempt - 1));
+    console.log(`[LiveKitManager] Scheduling reconnect attempt ${attempt}/${this.maxReconnectAttempts} in ${backoffMs}ms...`);
+
+    this.reconnectTimer = setTimeout(async () => {
+      this.reconnectTimer = null;
+      if (!this.isExplicitlyJoined || this.currentRoomConfig?.roomId !== reconnectConfig.roomId) return;
+
+      const staleRoom = this.room;
+      if (staleRoom) {
+        try {
+          staleRoom.removeAllListeners();
+          await staleRoom.disconnect(true);
+        } catch {}
+        if (this.room === staleRoom) {
+          this.room = null;
+        }
+      }
+
+      try {
+        await this.joinRoom(reconnectConfig);
+      } catch (err) {
+        if (this.isExplicitlyJoined && this.currentRoomConfig?.roomId === reconnectConfig.roomId) {
+          this.setConnectionState('reconnecting');
+          this.scheduleReconnect(null, err);
+        }
+      }
+    }, backoffMs);
   }
 
   private setupRoomEventListeners(room: Room) {
@@ -1428,7 +1577,27 @@ export class LiveKitManager {
       }
     });
 
+    room.on(RoomEvent.Reconnecting, () => {
+      if (this.room !== room) return;
+      console.log('[LiveKitManager] LiveKit is reconnecting…');
+      this.setConnectionState('reconnecting');
+    });
+
+    room.on(RoomEvent.Reconnected, () => {
+      if (this.room !== room) return;
+      console.log('[LiveKitManager] LiveKit reconnected successfully.');
+      this.reconnectAttempts = 0;
+      this.wasConnected = true;
+      if (this.reconnectTimer) {
+        clearTimeout(this.reconnectTimer);
+        this.reconnectTimer = null;
+      }
+      this.setConnectionState('connected');
+      this.syncAllParticipants();
+    });
+
     room.on(RoomEvent.ConnectionStateChanged, (state: LiveKitConnectionState) => {
+      if (this.room !== room) return;
       console.log(`[LIFECYCLE_AUDIT] ConnectionStateChanged: state="${state}"`);
       let mappedState: MediaConnectionState = 'connected';
       switch (state) {
@@ -1452,20 +1621,13 @@ export class LiveKitManager {
     });
 
     room.on(RoomEvent.Disconnected, (reason) => {
+      if (this.room !== room) return;
       console.warn('[LIFECYCLE_AUDIT] Disconnected from LiveKit room. Reason:', reason);
-      this.setConnectionState('disconnected');
-
-      if (this.isExplicitlyJoined && this.currentRoomConfig && this.wasConnected && this.reconnectAttempts < this.maxReconnectAttempts) {
-        this.reconnectAttempts++;
-        const backoffMs = Math.min(6000, 1000 * Math.pow(1.5, this.reconnectAttempts));
-        console.log(`[LiveKitManager] Unexpected disconnect detected. Triggering auto-reconnect attempt ${this.reconnectAttempts}/${this.maxReconnectAttempts} in ${backoffMs}ms...`);
-        setTimeout(() => {
-          if (this.isExplicitlyJoined && this.currentRoomConfig) {
-            this.joinRoom(this.currentRoomConfig).catch((err) => {
-              console.warn(`[LiveKitManager] Auto-reconnect attempt ${this.reconnectAttempts} failed:`, err?.message || err);
-            });
-          }
-        }, backoffMs);
+      if (this.isExplicitlyJoined && this.currentRoomConfig && this.wasConnected) {
+        this.setConnectionState('reconnecting');
+        this.scheduleReconnect(room, reason);
+      } else {
+        this.setConnectionState('disconnected');
       }
     });
   }

@@ -60,6 +60,11 @@ export class RealtimeMediaProvider implements IRealtimeMediaProvider {
   private cameraTelemetry: CameraTelemetryData | null = null;
   private telemetryIntervalTimer: ReturnType<typeof setInterval> | null = null;
   private mutePromiseLock: Promise<any> | null = null;
+  // Camera toggles and quality changes can arrive while getUserMedia is still
+  // resolving. Serialize them so an older request cannot republish over the
+  // profile the user selected most recently.
+  private cameraOperation: Promise<MediaStreamTrack | null> | null = null;
+  private cameraEnableIntent = false;
 
   private audioContext: AudioContext | null = null;
   private audioAnalyser: AnalyserNode | null = null;
@@ -388,7 +393,19 @@ export class RealtimeMediaProvider implements IRealtimeMediaProvider {
       try {
         await this.sfuAdapter.joinSession(config);
       } catch (err: any) {
-        console.warn('[SFU_SUBSYSTEM] SFU session join notice (continuing in resilient media mode):', err?.message || err);
+        console.error('[SFU_SUBSYSTEM] SFU session join failed:', err?.message || err);
+        await this.sfuAdapter.leaveSession().catch(() => {});
+        this.participants.delete(config.user.id);
+        this.activeRoom = null;
+        this.activeSessionId = null;
+        const mediaErr: MediaError = {
+          code: 'SFU_UNAVAILABLE',
+          message: err?.message || 'Failed to connect to the LiveKit media server',
+          details: err,
+        };
+        this.setConnectionState('failed');
+        this.emit({ type: 'error', error: mediaErr });
+        throw err instanceof Error ? err : new Error(mediaErr.message);
       }
     }
 
@@ -656,19 +673,28 @@ export class RealtimeMediaProvider implements IRealtimeMediaProvider {
     const effectiveType = conn?.effectiveType || '';
     const downlink = typeof conn?.downlink === 'number' ? conn.downlink : 10.0;
 
-    if (isSaveData || effectiveType === '2g' || effectiveType === 'slow-2g') {
+    if (isSaveData || effectiveType === '2g' || effectiveType === 'slow-2g' || downlink < 1) {
       console.log(`[CAMERA_PIPELINE] Auto profile resolved to LOW (downlink=${downlink}Mbps, saveData=${isSaveData})`);
       return 'low';
     }
 
-    console.log(`[CAMERA_PIPELINE] Auto profile resolved to ULTRA (1080p60 max quality)`);
+    if (effectiveType === '3g' || downlink < 3) {
+      console.log(`[CAMERA_PIPELINE] Auto profile resolved to BALANCED (downlink=${downlink}Mbps)`);
+      return 'balanced';
+    }
+
+    if (downlink < 6) {
+      console.log(`[CAMERA_PIPELINE] Auto profile resolved to HIGH (downlink=${downlink}Mbps)`);
+      return 'high';
+    }
+
+    console.log(`[CAMERA_PIPELINE] Auto profile resolved to ULTRA (downlink=${downlink}Mbps)`);
     return 'ultra';
   }
 
   private getCameraProfileSpecs(activeProfile: 'low' | 'balanced' | 'high' | 'ultra') {
     switch (activeProfile) {
       case 'ultra':
-      case 'high':
         return {
           targetWidth: 1920,
           targetHeight: 1080,
@@ -677,22 +703,31 @@ export class RealtimeMediaProvider implements IRealtimeMediaProvider {
           codec: 'vp8' as const,
           simulcast: true,
         };
-      case 'balanced':
+      case 'high':
         return {
           targetWidth: 1920,
           targetHeight: 1080,
           targetFps: 30,
-          maxBitrateBps: 4_000_000,
+          maxBitrateBps: 3_500_000,
+          codec: 'vp8' as const,
+          simulcast: true,
+        };
+      case 'balanced':
+        return {
+          targetWidth: 1280,
+          targetHeight: 720,
+          targetFps: 30,
+          maxBitrateBps: 1_800_000,
           codec: 'vp8' as const,
           simulcast: true,
         };
       case 'low':
       default:
         return {
-          targetWidth: 1280,
-          targetHeight: 720,
-          targetFps: 30,
-          maxBitrateBps: 1_800_000,
+          targetWidth: 640,
+          targetHeight: 360,
+          targetFps: 20,
+          maxBitrateBps: 500_000,
           codec: 'vp8' as const,
           simulcast: false,
         };
@@ -743,7 +778,24 @@ export class RealtimeMediaProvider implements IRealtimeMediaProvider {
   }
 
   public async enableCamera(): Promise<MediaStreamTrack | null> {
+    this.cameraEnableIntent = true;
+    const previous = this.cameraOperation || Promise.resolve<MediaStreamTrack | null>(null);
+    const operation = previous.catch(() => null).then(() => this.enableCameraInternal());
+    this.cameraOperation = operation;
+
     try {
+      return await operation;
+    } finally {
+      if (this.cameraOperation === operation) {
+        this.cameraOperation = null;
+      }
+    }
+  }
+
+  private async enableCameraInternal(): Promise<MediaStreamTrack | null> {
+    try {
+      if (!this.cameraEnableIntent) return null;
+
       if (typeof navigator === 'undefined' || !navigator.mediaDevices?.getUserMedia) {
         throw new Error('MediaDevices API unavailable');
       }
@@ -755,10 +807,11 @@ export class RealtimeMediaProvider implements IRealtimeMediaProvider {
         this.localVideoStream = null;
       }
 
-      const activeProfile = this.resolveActiveCameraProfile(this.cameraProfile);
+      const selectedProfile = this.cameraProfile;
+      const activeProfile = this.resolveActiveCameraProfile(selectedProfile);
       const specs = this.getCameraProfileSpecs(activeProfile);
 
-      console.log(`[CAMERA_PIPELINE] Attempting camera acquisition. Profile: ${this.cameraProfile} -> Active: ${activeProfile.toUpperCase()}`);
+      console.log(`[CAMERA_PIPELINE] Attempting camera acquisition. Profile: ${selectedProfile} -> Active: ${activeProfile.toUpperCase()}`);
 
       const constraintLevels: MediaStreamConstraints[] = [
         {
@@ -781,9 +834,9 @@ export class RealtimeMediaProvider implements IRealtimeMediaProvider {
         {
           video: {
             facingMode: { ideal: this.facingMode },
-            width: { ideal: 1280 },
-            height: { ideal: 720 },
-            frameRate: { ideal: 30 },
+            width: { ideal: specs.targetWidth },
+            height: { ideal: specs.targetHeight },
+            frameRate: { ideal: specs.targetFps },
           },
         },
         {
@@ -816,6 +869,13 @@ export class RealtimeMediaProvider implements IRealtimeMediaProvider {
         throw new Error('Could not acquire camera stream at any quality constraint level');
       }
 
+      // A disable or a newer queued quality change may have happened while
+      // getUserMedia was pending. Do not publish a stale stream in that case.
+      if (!this.cameraEnableIntent) {
+        stream.getTracks().forEach((track) => track.stop());
+        return null;
+      }
+
       this.localVideoStream = stream;
       const videoTrack = stream.getVideoTracks()[0];
       if (!videoTrack) {
@@ -824,12 +884,24 @@ export class RealtimeMediaProvider implements IRealtimeMediaProvider {
 
       try {
         await videoTrack.applyConstraints({
-          width: { ideal: 1920 },
-          height: { ideal: 1080 },
-          frameRate: { ideal: 60 },
+          width: { ideal: specs.targetWidth, max: specs.targetWidth },
+          height: { ideal: specs.targetHeight, max: specs.targetHeight },
+          frameRate: { ideal: specs.targetFps, max: specs.targetFps },
         });
       } catch (cErr) {
-        console.warn('[CAMERA_PIPELINE] applyConstraints 1080p60 notice:', cErr);
+        // Some mobile cameras reject max constraints after acquisition. Keep
+        // the selected profile as the preferred capture target rather than
+        // replacing it with a hard-coded 1080p/60 request.
+        console.warn('[CAMERA_PIPELINE] Profile constraints could not be fully applied:', cErr);
+        try {
+          await videoTrack.applyConstraints({
+            width: { ideal: specs.targetWidth },
+            height: { ideal: specs.targetHeight },
+            frameRate: { ideal: specs.targetFps },
+          });
+        } catch (fallbackErr) {
+          console.warn('[CAMERA_PIPELINE] Profile ideal constraints fallback failed:', fallbackErr);
+        }
       }
 
       const trackSettings = videoTrack.getSettings();
@@ -850,7 +922,7 @@ export class RealtimeMediaProvider implements IRealtimeMediaProvider {
       this.isCameraEnabled = true;
 
       const publishOptions: CameraPublishOptions = {
-        profile: this.cameraProfile,
+        profile: selectedProfile,
         activeProfile,
         targetWidth: specs.targetWidth,
         targetHeight: specs.targetHeight,
@@ -864,13 +936,11 @@ export class RealtimeMediaProvider implements IRealtimeMediaProvider {
       };
 
       if (this.sfuAdapter) {
-        await this.sfuAdapter.publishVideoTrack(videoTrack, publishOptions).catch((e) => {
-          console.warn('[CAMERA_PIPELINE] Error publishing video track to SFU adapter:', e);
-        });
+        await this.sfuAdapter.publishVideoTrack(videoTrack, publishOptions);
       }
 
       this.cameraTelemetry = {
-        profile: this.cameraProfile,
+        profile: selectedProfile,
         activeProfile,
         selectedResolution: `${specs.targetWidth}x${specs.targetHeight}`,
         actualCaptureResolution: `${actualWidth}x${actualHeight}`,
@@ -893,7 +963,7 @@ export class RealtimeMediaProvider implements IRealtimeMediaProvider {
 ========================================================================
 [CAMERA_PIPELINE] LOCAL CAMERA STREAM ACTIVE
 ------------------------------------------------------------------------
-Configured Profile           : ${this.cameraProfile} (Active Profile: ${activeProfile.toUpperCase()})
+Configured Profile           : ${selectedProfile} (Active Profile: ${activeProfile.toUpperCase()})
 Constraint Level Acquired     : Level ${acquiredLevel} of ${constraintLevels.length}
 Target Resolution & FPS      : ${specs.targetWidth}x${specs.targetHeight} @ ${specs.targetFps} FPS
 Actual Captured Resolution   : ${actualWidth}x${actualHeight} @ ${actualFps?.toFixed(1)} FPS
@@ -917,8 +987,25 @@ Adaptive Bitrate Monitor     : Running (monitoring packet loss & network through
       return videoTrack;
     } catch (err: any) {
       console.error('[CAMERA_PIPELINE] Failed to enable camera:', err);
+      if (this.localVideoStream) {
+        this.localVideoStream.getTracks().forEach((track) => {
+          try { track.stop(); } catch {}
+        });
+        this.localVideoStream = null;
+      }
+      this.isCameraEnabled = false;
+      this.cameraTelemetry = null;
+      this.updateSelfParticipant({
+        isCameraEnabled: false,
+        videoStream: null,
+      });
+      if (this.sfuAdapter) {
+        this.sfuAdapter.unpublishVideoTrack().catch(() => {});
+      }
+      const errorMessage = typeof err?.message === 'string' ? err.message.toLowerCase() : '';
+      const isSfuFailure = err?.name === 'SFU_UNAVAILABLE' || errorMessage.includes('livekit');
       const mediaErr: MediaError = {
-        code: err?.name === 'NotAllowedError' ? 'PERMISSION_DENIED' : 'DEVICE_UNAVAILABLE',
+        code: err?.name === 'NotAllowedError' ? 'PERMISSION_DENIED' : isSfuFailure ? 'SFU_UNAVAILABLE' : 'DEVICE_UNAVAILABLE',
         message: err?.message || 'Failed to access camera',
       };
       this.emit({ type: 'error', error: mediaErr });
@@ -975,6 +1062,7 @@ Adaptive Bitrate Monitor     : Running (monitoring packet loss & network through
   }
 
   public disableCamera(): void {
+    this.cameraEnableIntent = false;
     if (this.telemetryIntervalTimer) {
       clearInterval(this.telemetryIntervalTimer);
       this.telemetryIntervalTimer = null;

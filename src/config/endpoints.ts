@@ -48,7 +48,7 @@ export const ENDPOINTS = {
   LIVEKIT_URL: resolveLiveKitUrl(),
 
   /** Configured allowed origins for CORS validation */
-  ALLOWED_ORIGINS: (getEnvVar('ALLOWED_ORIGINS') || getEnvVar('VITE_ALLOWED_ORIGINS') || 'http://tauri.localhost,https://sirverdata.top')
+  ALLOWED_ORIGINS: (getEnvVar('ALLOWED_ORIGINS') || getEnvVar('VITE_ALLOWED_ORIGINS') || 'http://tauri.localhost,https://sirverdata.top,https://app.sirverdata.top')
     .split(',')
     .map((s) => s.trim())
     .filter(Boolean),

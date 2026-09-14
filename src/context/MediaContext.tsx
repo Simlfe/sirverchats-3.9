@@ -464,6 +464,8 @@ export const MediaProvider: React.FC<{
       } catch (err: any) {
         console.error('Failed to join voice room:', err);
         setActiveRoom(null);
+        setParticipants([]);
+        setConnectionState('disconnected');
         setError({
           code: 'SFU_UNAVAILABLE',
           message: err?.message || 'Failed to connect to voice server',
@@ -640,6 +642,14 @@ export const MediaProvider: React.FC<{
       startDurationTimer();
     } catch (err: any) {
       console.error('Error accepting call:', err);
+      setActiveRoom(null);
+      setParticipants([]);
+      setConnectionState('disconnected');
+      setError({
+        code: 'SFU_UNAVAILABLE',
+        message: err?.message || 'Failed to connect to the LiveKit media server',
+      });
+      callSignalingService.endCall(event.callId);
     }
   }, [incomingCall, currentUser]);
 
