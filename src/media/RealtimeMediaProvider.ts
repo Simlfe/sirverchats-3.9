@@ -13,8 +13,6 @@ import {
   AudioOutputRoute,
 } from '../types/media';
 import { getServerMemberAvatarUrl, getServerMemberDisplayName, pbService } from '../pocketbase';
-import liveKitSFUAdapter from './livekit/LiveKitSFUAdapter';
-import { LiveKitManager } from './livekit/LiveKitManager';
 import voicePresenceStore from '../services/voicePresenceStore';
 import { audioMixer } from '../services/audioMixer';
 
@@ -77,8 +75,10 @@ export class RealtimeMediaProvider implements IRealtimeMediaProvider {
   private speakingDetectorInterval: ReturnType<typeof setInterval> | null = null;
 
   private sfuAdapter: SFUProviderAdapter | null = null;
+  private sfuAdapterLoad: Promise<SFUProviderAdapter> | null = null;
   private sfuConfig: SFUServerConfig | null = null;
   private sfuAdapterUnsubscribe: (() => void) | null = null;
+  private audioOutputRoute: AudioOutputRoute = 'default';
   // React can request the same room from the accepted signal and the voice
   // panel at once. Share one promise so neither caller reports a connection
   // before LiveKit has actually finished negotiating.
@@ -100,7 +100,6 @@ export class RealtimeMediaProvider implements IRealtimeMediaProvider {
   private explicitlyLeftUsers: Map<string, string> = new Map(); // userId -> sessionId
 
   constructor() {
-    this.setSFUAdapter(liveKitSFUAdapter);
     try {
       if (typeof localStorage !== 'undefined') {
         const savedFacing = localStorage.getItem('sirver_camera_facing_mode');
@@ -111,8 +110,36 @@ export class RealtimeMediaProvider implements IRealtimeMediaProvider {
         if (savedProfile === 'auto' || savedProfile === 'low' || savedProfile === 'balanced' || savedProfile === 'high' || savedProfile === 'ultra') {
           this.cameraProfile = savedProfile as CameraQualityProfile;
         }
+        const savedRoute = localStorage.getItem('sirver_audio_output_route');
+        if (savedRoute === 'default' || savedRoute === 'speaker' || savedRoute === 'earpiece') {
+          this.audioOutputRoute = savedRoute;
+        }
       }
     } catch {}
+  }
+
+  /**
+   * Load the LiveKit adapter only when voice/video is actually used. The
+   * adapter imports the full LiveKit client, so keeping this path lazy makes
+   * chat/server startup substantially cheaper without changing call behavior.
+   */
+  private async ensureSfuAdapter(): Promise<SFUProviderAdapter> {
+    if (this.sfuAdapter) return this.sfuAdapter;
+    if (this.sfuAdapterLoad) return this.sfuAdapterLoad;
+
+    const load = import('./livekit/LiveKitSFUAdapter')
+      .then(({ default: adapter }) => {
+        this.setSFUAdapter(adapter);
+        return adapter as SFUProviderAdapter;
+      })
+      .finally(() => {
+        if (this.sfuAdapterLoad === load) {
+          this.sfuAdapterLoad = null;
+        }
+      });
+
+    this.sfuAdapterLoad = load;
+    return load;
   }
 
   public setSFUAdapter(adapter: SFUProviderAdapter | null) {
@@ -328,8 +355,8 @@ export class RealtimeMediaProvider implements IRealtimeMediaProvider {
   }
 
   public async preflightRoom(config: RoomConfig): Promise<void> {
-    const adapter = this.sfuAdapter;
-    if (!adapter || typeof adapter.preflightRoom !== 'function') return;
+    const adapter = await this.ensureSfuAdapter();
+    if (typeof adapter.preflightRoom !== 'function') return;
     await adapter.preflightRoom(config);
   }
 
@@ -363,6 +390,23 @@ export class RealtimeMediaProvider implements IRealtimeMediaProvider {
 
     if (this.connectionState === 'joining' || this.connectionState === 'connecting') {
       return this.getParticipants();
+    }
+
+    // Resolve the lazy adapter before creating an optimistic participant. A
+    // failed module load must be reported as a real call failure, never as a
+    // locally connected room that can start ringing indefinitely.
+    let adapter: SFUProviderAdapter;
+    try {
+      adapter = await this.ensureSfuAdapter();
+    } catch (err: any) {
+      const mediaErr: MediaError = {
+        code: 'SFU_UNAVAILABLE',
+        message: err?.message || 'Failed to load the LiveKit media client',
+        details: err,
+      };
+      this.setConnectionState('failed');
+      this.emit({ type: 'error', error: mediaErr });
+      throw err instanceof Error ? err : new Error(mediaErr.message);
     }
 
     // 2. Clean up previous room if switching rooms safely
@@ -425,16 +469,16 @@ export class RealtimeMediaProvider implements IRealtimeMediaProvider {
     this.participants.set(config.user.id, selfParticipant);
 
     // 1. Trigger SFU session join if adapter is attached FIRST so room.localParticipant is ready
-    if (this.sfuAdapter) {
+    if (adapter) {
       try {
-        await this.sfuAdapter.joinSession(config);
-        const adapterState = this.sfuAdapter.getConnectionState();
+        await adapter.joinSession(config);
+        const adapterState = adapter.getConnectionState();
         if (adapterState !== 'connected') {
           throw new Error(`Media server did not reach a connected state (${adapterState})`);
         }
       } catch (err: any) {
         console.error('[SFU_SUBSYSTEM] SFU session join failed:', err?.message || err);
-        await this.sfuAdapter.leaveSession().catch(() => {});
+        await adapter.leaveSession().catch(() => {});
         this.participants.delete(config.user.id);
         this.activeRoom = null;
         this.activeSessionId = null;
@@ -732,12 +776,26 @@ export class RealtimeMediaProvider implements IRealtimeMediaProvider {
     return 'ultra';
   }
 
-  public setAudioOutputRoute(route: AudioOutputRoute): Promise<boolean> {
-    return LiveKitManager.getInstance().setAudioOutputRoute(route);
+  public async setAudioOutputRoute(route: AudioOutputRoute): Promise<boolean> {
+    this.audioOutputRoute = route;
+    try {
+      if (typeof localStorage !== 'undefined') {
+        localStorage.setItem('sirver_audio_output_route', route);
+      }
+    } catch {}
+
+    // Persist the preference even before the first call. Apply it to LiveKit
+    // immediately only when the media adapter has already been loaded.
+    if (!this.sfuAdapter || !('setAudioOutputRoute' in this.sfuAdapter)) {
+      return false;
+    }
+    return (this.sfuAdapter as SFUProviderAdapter & {
+      setAudioOutputRoute: (value: AudioOutputRoute) => Promise<boolean>;
+    }).setAudioOutputRoute(route);
   }
 
   public getAudioOutputRoute(): AudioOutputRoute {
-    return LiveKitManager.getInstance().getAudioOutputRoute();
+    return this.audioOutputRoute;
   }
 
   private getCameraProfileSpecs(activeProfile: 'low' | 'balanced' | 'high' | 'ultra') {
@@ -1090,6 +1148,9 @@ Adaptive Bitrate Monitor     : Running (monitoring packet loss & network through
   public async switchCamera(): Promise<boolean> {
     this.facingMode = this.facingMode === 'user' ? 'environment' : 'user';
     try {
+      // The manager is part of the lazy LiveKit chunk. Loading it here keeps
+      // camera switching correct without pulling LiveKit into app startup.
+      const { LiveKitManager } = await import('./livekit/LiveKitManager');
       LiveKitManager.getInstance().setFacingMode(this.facingMode);
     } catch (e) {}
     try {

@@ -1,4 +1,4 @@
-import { LocalNotifications, PermissionStatus } from '@capacitor/local-notifications';
+import type { PermissionStatus } from '@capacitor/local-notifications';
 import { NotificationItem } from '../types';
 import { playPingSound } from '../lib/sounds';
 import { showAndFocusWindow } from '../lib/tauriDesktopService';
@@ -8,6 +8,8 @@ type NotificationTapListener = (notification: NotificationItem) => void;
 
 class NotificationService {
   private isNative: boolean = false;
+  private nativeNotifications: typeof import('@capacitor/local-notifications').LocalNotifications | null = null;
+  private nativeNotificationsLoad: Promise<typeof import('@capacitor/local-notifications').LocalNotifications | null> | null = null;
   private channelsCreated: boolean = false;
   private processedNotifIds: Set<string> = new Set();
   private tapListeners: Set<NotificationTapListener> = new Set();
@@ -15,6 +17,33 @@ class NotificationService {
 
   constructor() {
     this.isNative = typeof window !== 'undefined' && !!(window as any).Capacitor?.isNativePlatform?.();
+  }
+
+  /**
+   * The Capacitor notification plugin is only needed by the legacy
+   * Capacitor shell. Load it on demand so Tauri desktop/Android and browser
+   * startup do not pay for native notification code or bridge initialisation.
+   */
+  private async getNativeNotifications() {
+    if (!this.isNative) return null;
+    if (this.nativeNotifications) return this.nativeNotifications;
+    if (this.nativeNotificationsLoad) return this.nativeNotificationsLoad;
+
+    const load = import('@capacitor/local-notifications')
+      .then(({ LocalNotifications }) => {
+        this.nativeNotifications = LocalNotifications;
+        return LocalNotifications;
+      })
+      .catch((err) => {
+        console.warn('[NOTIFICATION_SERVICE] Failed to load native notification plugin:', err);
+        return null;
+      })
+      .finally(() => {
+        if (this.nativeNotificationsLoad === load) this.nativeNotificationsLoad = null;
+      });
+
+    this.nativeNotificationsLoad = load;
+    return load;
   }
 
   /**
@@ -40,7 +69,9 @@ class NotificationService {
   private async createChannels(): Promise<void> {
     if (this.channelsCreated || !this.isNative) return;
     try {
-      await LocalNotifications.createChannel({
+      const notifications = await this.getNativeNotifications();
+      if (!notifications) return;
+      await notifications.createChannel({
         id: 'friend_requests',
         name: 'Friend Requests',
         description: 'Notifications for incoming friend requests and acceptances',
@@ -50,7 +81,7 @@ class NotificationService {
         sound: 'default'
       });
 
-      await LocalNotifications.createChannel({
+      await notifications.createChannel({
         id: 'messages',
         name: 'Messages & Mentions',
         description: 'Notifications for direct messages, mentions, and replies',
@@ -60,7 +91,7 @@ class NotificationService {
         sound: 'default'
       });
 
-      await LocalNotifications.createChannel({
+      await notifications.createChannel({
         id: 'calls',
         name: 'Calls & Voice',
         description: 'Notifications for incoming voice and video calls',
@@ -70,7 +101,7 @@ class NotificationService {
         sound: 'default'
       });
 
-      await LocalNotifications.createChannel({
+      await notifications.createChannel({
         id: 'system',
         name: 'System Alerts',
         description: 'System updates and general announcements',
@@ -92,7 +123,9 @@ class NotificationService {
    */
   private async setupNativeListeners(): Promise<void> {
     try {
-      await LocalNotifications.addListener('localNotificationActionPerformed', (action) => {
+      const notifications = await this.getNativeNotifications();
+      if (!notifications) return;
+      await notifications.addListener('localNotificationActionPerformed', (action) => {
         console.log('[NOTIFICATION_SERVICE] Native notification tapped:', action);
         showAndFocusWindow();
 
@@ -115,7 +148,9 @@ class NotificationService {
   public async checkPermission(): Promise<boolean> {
     if (this.isNative) {
       try {
-        const status: PermissionStatus = await LocalNotifications.checkPermissions();
+        const notifications = await this.getNativeNotifications();
+        if (!notifications) return false;
+        const status: PermissionStatus = await notifications.checkPermissions();
         return status.display === 'granted';
       } catch (e) {
         console.warn('[NOTIFICATION_SERVICE] Check permission failed on native:', e);
@@ -132,7 +167,9 @@ class NotificationService {
   public async requestPermission(): Promise<boolean> {
     if (this.isNative) {
       try {
-        const status: PermissionStatus = await LocalNotifications.requestPermissions();
+        const notifications = await this.getNativeNotifications();
+        if (!notifications) return false;
+        const status: PermissionStatus = await notifications.requestPermissions();
         if (status.display === 'granted') {
           await this.createChannels();
           return true;
@@ -245,8 +282,10 @@ class NotificationService {
       try {
         const hasPerm = await this.checkPermission();
         if (hasPerm) {
+          const notifications = await this.getNativeNotifications();
+          if (!notifications) return;
           const numericId = this.hashStringToInt(notif.id);
-          await LocalNotifications.schedule({
+          await notifications.schedule({
             notifications: [
               {
                 id: numericId,

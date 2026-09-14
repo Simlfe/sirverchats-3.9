@@ -1,7 +1,28 @@
-import { App } from '@capacitor/app';
-import { StatusBar } from '@capacitor/status-bar';
-
 type FullscreenChangeListener = (isFullscreen: boolean, element: Element | null) => void;
+
+function isCapacitorNative(): boolean {
+  return typeof window !== 'undefined' && !!(window as any).Capacitor?.isNativePlatform?.();
+}
+
+async function getCapacitorApp() {
+  if (!isCapacitorNative()) return null;
+  try {
+    const module = await import('@capacitor/app');
+    return module.App;
+  } catch {
+    return null;
+  }
+}
+
+async function setCapacitorStatusBar(action: 'show' | 'hide'): Promise<void> {
+  if (!isCapacitorNative()) return;
+  try {
+    const { StatusBar } = await import('@capacitor/status-bar');
+    await StatusBar[action]();
+  } catch {
+    // Tauri Android and browsers do not expose the Capacitor status-bar API.
+  }
+}
 
 class FullscreenManagerClass {
   private listeners: Set<FullscreenChangeListener> = new Set();
@@ -18,13 +39,13 @@ class FullscreenManagerClass {
   }
 
   private setupAndroidBackButton() {
-    if (typeof window !== 'undefined' && (window as any).Capacitor?.isNativePlatform?.()) {
-      App.addListener('backButton', () => {
+    if (isCapacitorNative()) {
+      void getCapacitorApp().then((app) => app?.addListener('backButton', () => {
         if (this.getFullscreenElement()) {
           console.log('[FULLSCREEN_MANAGER] Android Back button pressed while in fullscreen. Exiting fullscreen.');
           this.exitFullscreen();
         }
-      }).then((listener) => {
+      })).then((listener) => {
         this.backButtonListener = listener;
       }).catch(() => {});
     }
@@ -60,9 +81,7 @@ class FullscreenManagerClass {
     console.log('[FULLSCREEN_MANAGER] Target video element found:', !!videoEl);
 
     try {
-      if (typeof window !== 'undefined' && (window as any).Capacitor?.isNativePlatform?.()) {
-        StatusBar.hide().catch(() => {});
-      }
+      void setCapacitorStatusBar('hide');
 
       if (targetElement.requestFullscreen) {
         console.log('[FULLSCREEN_MANAGER] Calling targetElement.requestFullscreen()');
@@ -101,9 +120,7 @@ class FullscreenManagerClass {
         await (document as any).webkitExitFullscreen();
       }
 
-      if (typeof window !== 'undefined' && (window as any).Capacitor?.isNativePlatform?.()) {
-        StatusBar.show().catch(() => {});
-      }
+      void setCapacitorStatusBar('show');
 
       console.log('[FULLSCREEN_MANAGER] exitFullscreen() resolved successfully.');
       return true;
@@ -134,8 +151,8 @@ class FullscreenManagerClass {
       activeElementTag: activeEl?.tagName,
     });
 
-    if (!isFs && typeof window !== 'undefined' && (window as any).Capacitor?.isNativePlatform?.()) {
-      StatusBar.show().catch(() => {});
+    if (!isFs && isCapacitorNative()) {
+      void setCapacitorStatusBar('show');
     }
 
     this.listeners.forEach((listener) => listener(isFs, activeEl));

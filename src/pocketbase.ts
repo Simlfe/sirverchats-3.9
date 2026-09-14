@@ -537,6 +537,9 @@ class PocketBaseService {
   private serverMembersCache: Map<string, Map<string, ServerMember>> = new Map();
   private usersCache: User[] | null = null;
   private lastUsersFetch: number = 0;
+  // Multiple panels can ask for the directory during login. Share one
+  // request instead of opening a PocketBase connection for each caller.
+  private usersFetchPromise: Promise<User[]> | null = null;
   private privateChatServerCache: Map<string, any> = new Map();
   private dmMessagesCache: Map<string, Message[]> = new Map();
   private serverChannelsCache: Map<string, Channel[]> = new Map();
@@ -2941,30 +2944,43 @@ class PocketBaseService {
     if (!forceRefresh && this.usersCache && this.usersCache.length > 0 && (Date.now() - this.lastUsersFetch < 120000)) {
       return this.usersCache;
     }
-    try {
-      const records = await this.pb.collection('users').getFullList({
-        sort: '-created',
-        requestKey: null
-      });
-      this.usersCache = records as any as User[];
-      this.lastUsersFetch = Date.now();
+    if (this.usersFetchPromise) return this.usersFetchPromise;
+
+    const request = (async (): Promise<User[]> => {
       try {
-        localStorage.setItem('cached_all_users', JSON.stringify(this.usersCache));
-      } catch (err) {}
-      return this.usersCache;
-    } catch (e) {
-      try {
-        const pageRecords = await this.pb.collection('users').getList(1, 200, { requestKey: null });
-        this.usersCache = pageRecords.items as any as User[];
+        const records = await this.pb.collection('users').getFullList({
+          sort: '-created',
+          requestKey: null
+        });
+        this.usersCache = records as any as User[];
         this.lastUsersFetch = Date.now();
         try {
           localStorage.setItem('cached_all_users', JSON.stringify(this.usersCache));
         } catch (err) {}
         return this.usersCache;
-      } catch (innerErr) {
-        if (this.usersCache) return this.usersCache;
-        console.warn('Failed to fetch users:', e);
-        return [];
+      } catch (e) {
+        try {
+          const pageRecords = await this.pb.collection('users').getList(1, 200, { requestKey: null });
+          this.usersCache = pageRecords.items as any as User[];
+          this.lastUsersFetch = Date.now();
+          try {
+            localStorage.setItem('cached_all_users', JSON.stringify(this.usersCache));
+          } catch (err) {}
+          return this.usersCache;
+        } catch (innerErr) {
+          if (this.usersCache) return this.usersCache;
+          console.warn('Failed to fetch users:', e);
+          return [];
+        }
+      }
+    })();
+
+    this.usersFetchPromise = request;
+    try {
+      return await request;
+    } finally {
+      if (this.usersFetchPromise === request) {
+        this.usersFetchPromise = null;
       }
     }
   }

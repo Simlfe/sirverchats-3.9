@@ -1,7 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { Activity, X, Cpu, Gauge, Zap, AlertTriangle } from 'lucide-react';
 import { ParticipantDiagnosticsData } from '../types/media';
-import liveKitManager from '../media/livekit/LiveKitManager';
 
 interface ParticipantDiagnosticsOverlayProps {
   userId: string;
@@ -22,9 +21,12 @@ export const ParticipantDiagnosticsOverlay: React.FC<ParticipantDiagnosticsOverl
   useEffect(() => {
     let isMounted = true;
     const pollDiagnostics = async () => {
-      const data = await liveKitManager.getParticipantDiagnostics(userId);
-      if (isMounted) {
-        setDiag(data);
+      try {
+        const { default: liveKitManager } = await import('../media/livekit/LiveKitManager');
+        const data = await liveKitManager.getParticipantDiagnostics(userId);
+        if (isMounted) setDiag(data);
+      } catch {
+        if (isMounted) setDiag(null);
       }
     };
 

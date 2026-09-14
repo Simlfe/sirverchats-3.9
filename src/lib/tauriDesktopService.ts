@@ -6,7 +6,6 @@ import { openUrl, openPath } from '@tauri-apps/plugin-opener';
 import { open as openShell } from '@tauri-apps/plugin-shell';
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
 import { mkdir, exists, readFile, writeFile, remove } from '@tauri-apps/plugin-fs';
-import { App as CapApp } from '@capacitor/app';
 
 export type TargetOS = 'windows' | 'linux' | 'android' | 'macos' | 'unknown';
 
@@ -46,6 +45,24 @@ export function isMobilePlatform(): boolean {
   }
   const ua = navigator.userAgent || '';
   return /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(ua);
+}
+
+/**
+ * Load the Capacitor app plugin only for the legacy Capacitor shell. Tauri
+ * desktop and Tauri Android do not use this bridge, so importing it eagerly
+ * would add startup work (and can make native navigation look like a web
+ * hand-off).
+ */
+async function getCapacitorApp() {
+  if (typeof window === 'undefined' || isTauriEnvironment()) return null;
+  const capacitor = (window as any).Capacitor;
+  if (!capacitor?.isNativePlatform?.()) return null;
+  try {
+    const module = await import('@capacitor/app');
+    return module.App;
+  } catch {
+    return null;
+  }
 }
 
 export function isDesktopPlatform(): boolean {
@@ -444,8 +461,9 @@ export async function minimizeWindow(): Promise<void> {
     }
   }
   try {
-    if (CapApp && typeof CapApp.minimizeApp === 'function') {
-      await CapApp.minimizeApp();
+    const capApp = await getCapacitorApp();
+    if (capApp && typeof capApp.minimizeApp === 'function') {
+      await capApp.minimizeApp();
     }
   } catch (e) {}
 }
@@ -533,8 +551,9 @@ export async function closeWindow(): Promise<void> {
 
   // Capacitor / Mobile fallback
   try {
-    if (CapApp && typeof CapApp.minimizeApp === 'function') {
-      await CapApp.minimizeApp();
+    const capApp = await getCapacitorApp();
+    if (capApp && typeof capApp.minimizeApp === 'function') {
+      await capApp.minimizeApp();
       return;
     }
   } catch (e) {}

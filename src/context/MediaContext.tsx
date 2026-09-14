@@ -132,11 +132,22 @@ export const MediaProvider: React.FC<{
   }, [propCurrentUser]);
 
   useEffect(() => {
-    const timer = setInterval(() => {
-      setCameraTelemetry(realtimeMediaProvider.getActiveCameraTelemetry());
-    }, 1000);
+    // Camera telemetry is useful while a media session is active, but polling
+    // it while the app is idle forces an otherwise unnecessary provider update
+    // every second on every platform.
+    if (!activeRoom?.roomId && !isCameraEnabled) {
+      return;
+    }
+
+    const refreshTelemetry = () => {
+      const next = realtimeMediaProvider.getActiveCameraTelemetry();
+      setCameraTelemetry((previous) => (previous === next ? previous : next));
+    };
+
+    refreshTelemetry();
+    const timer = setInterval(refreshTelemetry, 1000);
     return () => clearInterval(timer);
-  }, []);
+  }, [activeRoom?.roomId, isCameraEnabled]);
 
   const setCameraQualityProfile = useCallback((profile: CameraQualityProfile) => {
     realtimeMediaProvider.setCameraQualityProfile(profile);

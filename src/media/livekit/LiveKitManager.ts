@@ -164,7 +164,6 @@ export class LiveKitManager {
         this.audioOutputDeviceIds.earpiece = localStorage.getItem('sirver_audio_output_device_earpiece') || null;
       }
     } catch {}
-    this.startTokenRefreshTimer();
     audioMixer.subscribe(() => {
       this.updateAllAudioElementVolumes();
     });
@@ -399,6 +398,7 @@ export class LiveKitManager {
         console.log('[LiveKitManager] Already connected/connecting to room:', roomConfig.roomId, '- Reusing active Room instance.');
         this.isExplicitlyJoined = true;
         this.currentRoomConfig = roomConfig;
+        this.startTokenRefreshTimer();
         this.setConnectionState(this.room.state === LiveKitConnectionState.Reconnecting ? 'reconnecting' : this.room.state === LiveKitConnectionState.Connecting ? 'connecting' : 'connected');
         this.syncAllParticipants();
         return;
@@ -422,6 +422,10 @@ export class LiveKitManager {
 
       this.currentRoomConfig = roomConfig;
       this.isExplicitlyJoined = true;
+      // Token refresh is only useful while a room is active. Starting this
+      // timer in the constructor made every idle client wake up forever even
+      // when no call had ever been placed.
+      this.startTokenRefreshTimer();
       this.setConnectionState('joining');
 
       const identity = roomConfig.user.id;
@@ -450,6 +454,7 @@ export class LiveKitManager {
           this.isExplicitlyJoined = false;
           this.wasConnected = false;
           this.currentRoomConfig = null;
+          this.stopTokenRefreshTimer();
           this.setConnectionState('failed');
         }
         this.emit({ type: 'error', error: mediaErr });
@@ -511,6 +516,7 @@ export class LiveKitManager {
             this.wasConnected = false;
             if (this.currentRoomConfig?.roomId === roomConfig.roomId) {
               this.currentRoomConfig = null;
+              this.stopTokenRefreshTimer();
               this.setConnectionState('disconnected');
             }
             // An aborted initial join is a failed attempt, not a successful
@@ -535,6 +541,7 @@ export class LiveKitManager {
           this.wasConnected = false;
           if (this.currentRoomConfig?.roomId === roomConfig.roomId) {
             this.currentRoomConfig = null;
+            this.stopTokenRefreshTimer();
           }
           this.setConnectionState('failed');
         }
@@ -565,6 +572,7 @@ export class LiveKitManager {
     this.isExplicitlyJoined = false;
     this.wasConnected = false;
     this.currentRoomConfig = null;
+    this.stopTokenRefreshTimer();
     this.reconnectAttempts = 0;
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
@@ -1238,6 +1246,12 @@ export class LiveKitManager {
     this.tokenRefreshTimer = setInterval(() => {
       this.checkAndRefreshToken();
     }, 45 * 1000); // Check every 45s
+  }
+
+  private stopTokenRefreshTimer() {
+    if (!this.tokenRefreshTimer) return;
+    clearInterval(this.tokenRefreshTimer);
+    this.tokenRefreshTimer = null;
   }
 
   private async checkAndRefreshToken() {

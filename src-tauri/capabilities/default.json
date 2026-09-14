@@ -41,11 +41,6 @@
     "dialog:allow-save",
     "dialog:allow-message",
     "dialog:allow-ask",
-    "dialog:allow-confirm",
-    "updater:default",
-    "updater:allow-check",
-    "updater:allow-download-and-install",
-    "process:default",
-    "process:allow-restart"
+    "dialog:allow-confirm"
   ]
 }

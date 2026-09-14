@@ -1,3 +1,4 @@
+#[cfg(desktop)]
 use tauri::Manager;
 
 #[cfg(desktop)]
@@ -7,22 +8,22 @@ use tauri::{
 };
 
 #[tauri::command]
-fn minimize_window(window: tauri::Window) {
+fn minimize_window(_window: tauri::Window) {
     #[cfg(desktop)]
     {
-        let _ = window.minimize();
+        let _ = _window.minimize();
     }
 }
 
 #[tauri::command]
-fn toggle_maximize_window(window: tauri::Window) -> bool {
+fn toggle_maximize_window(_window: tauri::Window) -> bool {
     #[cfg(desktop)]
     {
-        if window.is_maximized().unwrap_or(false) {
-            let _ = window.unmaximize();
+        if _window.is_maximized().unwrap_or(false) {
+            let _ = _window.unmaximize();
             return false;
         } else {
-            let _ = window.maximize();
+            let _ = _window.maximize();
             return true;
         }
     }
@@ -48,13 +49,21 @@ fn close_to_tray(window: tauri::Window) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let builder = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_fs::init())
-        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_dialog::init());
+
+    // Updater/process support is desktop-only. Keeping these plugins out of
+    // the Android runtime prevents mobile startup from initialising desktop
+    // update endpoints or process controls.
+    #[cfg(desktop)]
+    let builder = builder
         .plugin(tauri_plugin_updater::Builder::new().build())
-        .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_process::init());
+
+    builder
         .invoke_handler(tauri::generate_handler![
             minimize_window,
             toggle_maximize_window,
@@ -125,6 +134,11 @@ pub fn run() {
                 } else {
                     let _ = builder.build(app);
                 }
+            }
+
+            #[cfg(mobile)]
+            {
+                let _ = app;
             }
 
             Ok(())

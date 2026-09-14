@@ -4,7 +4,6 @@ import { pbService, mergeUserRecord } from './pocketbase';
 import { MessageDeletionService } from './services/messageDeletionService';
 import { getLanguageDictionary } from './services/localization';
 import { Bell, Volume2 } from 'lucide-react';
-import { App as CapApp } from '@capacitor/app';
 import { User, Server, Channel, Message, Attachment, Translation, AppLanguageConfig, MusicTrack, NotificationItem, UnreadChannelInfo, Call } from './types';
 import { sendInAppNotification, requestNotificationPermission, isEphemeralCallNotification } from './lib/notifications';
 import { notificationService } from './services/notificationService';
@@ -23,8 +22,7 @@ import { backStackManager, useBackHandler } from './services/backStackManager';
 // Components
 import AuthScreen from './components/AuthScreen';
 import ChannelList from './components/ChannelList';
-import ChatPanel, { ActiveUploadState } from './components/ChatPanel';
-import VoicePanel from './components/VoicePanel';
+import type { ActiveUploadState } from './components/ChatPanel';
 import UserProfileModal, { AnchorRect } from './components/UserProfileModal';
 import NotificationToast, { ToastNotice } from './components/NotificationToast';
 import NotificationsPopover from './components/NotificationsPopover';
@@ -35,6 +33,8 @@ import { GlobalMusicPlayer } from './components/MusicPlayer';
 
 // Code-Split Lazy Loaded Components
 const SettingsModal = React.lazy(() => import('./components/SettingsModal'));
+const ChatPanel = React.lazy(() => import('./components/ChatPanel'));
+const VoicePanel = React.lazy(() => import('./components/VoicePanel'));
 const ServerSettingsModal = React.lazy(() => import('./components/ServerSettingsModal'));
 const DiscoveryCenter = React.lazy(() => import('./components/DiscoveryCenter'));
 const CreateServerModal = React.lazy(() => import('./components/CreateServerModal'));
@@ -52,6 +52,24 @@ import { realtimeMediaProvider } from './media/RealtimeMediaProvider';
 import voicePresenceStore from './services/voicePresenceStore';
 
 const EMPTY_ACTIVE_CALLS: Call[] = [];
+
+/**
+ * Capacitor is retained only for the legacy Android shell. Keep its plugin
+ * out of the Tauri/browser startup bundle and never initialise it inside a
+ * Tauri window. Tauri Android has its own native activity and does not need
+ * the Capacitor bridge for navigation or updates.
+ */
+async function getCapacitorApp() {
+  if (typeof window === 'undefined') return null;
+  const capacitor = (window as any).Capacitor;
+  if (!capacitor?.isNativePlatform?.()) return null;
+  try {
+    const module = await import('@capacitor/app');
+    return module.App;
+  } catch {
+    return null;
+  }
+}
 
 function extractResetTokenFromUrl(urlStr?: string): string | null {
   if (typeof window === 'undefined') return null;
@@ -154,9 +172,11 @@ export default function App() {
       setResetToken(initialToken);
     }
 
+    let disposed = false;
     let capListener: any = null;
-    try {
-      capListener = CapApp.addListener('appUrlOpen', (data: any) => {
+    void getCapacitorApp().then((capApp) => {
+      if (disposed || !capApp) return;
+      capListener = capApp.addListener('appUrlOpen', (data: any) => {
         if (data?.url) {
           const deepToken = extractResetTokenFromUrl(data.url);
           if (deepToken) {
@@ -164,11 +184,14 @@ export default function App() {
           }
         }
       });
-    } catch (e) {}
+    }).catch(() => {});
 
     return () => {
+      disposed = true;
       if (capListener && typeof capListener.then === 'function') {
         capListener.then((h: any) => h?.remove?.()).catch(() => {});
+      } else if (capListener && typeof capListener.remove === 'function') {
+        capListener.remove();
       }
     };
   }, []);
@@ -650,6 +673,7 @@ export default function App() {
     } catch (e) {}
 
     let exitTimer: any = null;
+    let disposed = false;
 
     const handleDoubleBackExit = () => {
       const now = Date.now();
@@ -657,13 +681,10 @@ export default function App() {
         if (exitTimer) clearTimeout(exitTimer);
         lastBackPressTimeRef.current = 0;
         setExitToast(null);
-        try {
-          CapApp.exitApp();
-        } catch (e) {
-          try {
-            CapApp.minimizeApp();
-          } catch (err) {}
-        }
+        void getCapacitorApp().then((capApp) => {
+          if (!capApp) return;
+          return capApp.exitApp().catch(() => capApp.minimizeApp().catch(() => {}));
+        }).catch(() => {});
       } else {
         lastBackPressTimeRef.current = now;
         const msg = langRef.current === 'ar' ? 'اضغط رجوع مرة أخرى للخروج' : 'Press back again to exit';
@@ -720,15 +741,17 @@ export default function App() {
     window.addEventListener('popstate', handlePopState);
 
     let capListener: any = null;
-    CapApp.addListener('backButton', () => {
-      triggerGlobalBack();
+    void getCapacitorApp().then((capApp) => {
+      if (disposed || !capApp) return;
+      return capApp.addListener('backButton', () => {
+        triggerGlobalBack();
+      });
     }).then((l) => {
-      capListener = l;
-    }).catch((e) => {
-      console.warn('Capacitor backButton notice:', e);
-    });
+      if (l) capListener = l;
+    }).catch(() => {});
 
     return () => {
+      disposed = true;
       window.removeEventListener('popstate', handlePopState);
       if (capListener && typeof capListener.remove === 'function') {
         capListener.remove();
@@ -1079,8 +1102,10 @@ export default function App() {
 
     // 3. Non-blocking background sync from PocketBase
     try {
-      const userChatServers = await pbService.getUserPrivateChatServers();
-      const allUsers = await pbService.fetchAllUsers();
+      const [userChatServers, allUsers] = await Promise.all([
+        pbService.getUserPrivateChatServers(),
+        pbService.fetchAllUsers(),
+      ]);
       const currentId = currentUser?.id;
 
       const dynamicDmChannels: Channel[] = [];
@@ -1133,12 +1158,7 @@ export default function App() {
 
   useEffect(() => {
     if (currentUser) {
-      loadAllDmChannels();
-      // Preload heavy SettingsModal chunk in background when idle so opening it is instantaneous
-      const timer = setTimeout(() => {
-        import('./components/SettingsModal').catch(() => {});
-      }, 200);
-      return () => clearTimeout(timer);
+      void loadAllDmChannels();
     }
   }, [currentUser]);
 
@@ -4040,21 +4060,28 @@ export default function App() {
                   />
                 </Suspense>
               ) : (activeChannel && activeChannel.type === 'voice') ? (
-                <VoicePanel
-                  channel={activeChannel}
-                  currentUser={currentUser}
-                  isMuted={isMuted}
-                  isDeafened={isDeafened}
-                  onToggleMute={handleToggleMuteCallback}
-                  onToggleDeafen={handleToggleDeafenCallback}
-                  onLeave={handleLeaveVoice}
-                  t={t}
-                  lang={lang}
-                  theme={effectiveTheme}
-                  onSelectUser={handleSelectUser}
-                  onToggleSidebar={handleToggleSidebar}
-                  initialMode={activeCallMode}
-                />
+                <Suspense fallback={
+                  <div className="flex-1 flex flex-col items-center justify-center gap-3 text-[var(--theme-text-muted)]">
+                    <div className="w-8 h-8 rounded-full border-2 border-[var(--theme-accent)] border-t-transparent animate-spin" />
+                    <span className="text-xs font-semibold">{lang === 'ar' ? 'جارٍ تحميل المكالمة…' : 'Loading call…'}</span>
+                  </div>
+                }>
+                  <VoicePanel
+                    channel={activeChannel}
+                    currentUser={currentUser}
+                    isMuted={isMuted}
+                    isDeafened={isDeafened}
+                    onToggleMute={handleToggleMuteCallback}
+                    onToggleDeafen={handleToggleDeafenCallback}
+                    onLeave={handleLeaveVoice}
+                    t={t}
+                    lang={lang}
+                    theme={effectiveTheme}
+                    onSelectUser={handleSelectUser}
+                    onToggleSidebar={handleToggleSidebar}
+                    initialMode={activeCallMode}
+                  />
+                </Suspense>
               ) : (activeChannel || activeServerChannel || activeDmChannel) ? (
                 <div className="flex-1 flex min-w-0 w-full h-full relative overflow-hidden">
                   {(() => {
@@ -4072,8 +4099,13 @@ export default function App() {
                       : undefined;
 
                     return (
+                      <Suspense fallback={
+                        <div className="flex-1 flex flex-col items-center justify-center gap-3 text-[var(--theme-text-muted)]">
+                          <div className="w-8 h-8 rounded-full border-2 border-[var(--theme-accent)] border-t-transparent animate-spin" />
+                          <span className="text-xs font-semibold">{lang === 'ar' ? 'جارٍ تحميل المحادثة…' : 'Loading conversation…'}</span>
+                        </div>
+                      }>
                       <ChatPanel
-                        key={`chat-panel-${currentChatChannel.id}`}
                         isActive={true}
                         isInitialLoading={Boolean(isInitialLoadingChannel && (!messagesCache.current[currentChatChannel.id] || !messagesCache.current[currentChatChannel.id]?.items))}
                         channel={currentChatChannel}
@@ -4117,6 +4149,7 @@ export default function App() {
                         onCloseDm={isDm ? () => handleCloseDm(currentChatChannel) : undefined}
                         onExpandVoice={handleExpandVoice}
                       />
+                      </Suspense>
                     );
                   })()}
                 </div>

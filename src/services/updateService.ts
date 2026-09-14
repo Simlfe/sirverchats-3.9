@@ -1,7 +1,7 @@
 import { pbService } from '../pocketbase';
 import { AppUpdateRecord } from '../types';
 import { getCachedUserSettings } from '../lib/userSettings';
-import { isTauriEnvironment } from '../lib/tauriDesktopService';
+import { isTauriEnvironment, isMobilePlatform } from '../lib/tauriDesktopService';
 import { downloadManager, DownloadItem, getBlobFromDB } from './downloadManager';
 
 export const CURRENT_APP_VERSION = '1.0';
@@ -63,6 +63,14 @@ export type UpdateListener = (state: UpdateState) => void;
 // Safe dynamic access for Tauri v2 native in-place updater plugins
 let tauriUpdaterModule: typeof import('@tauri-apps/plugin-updater') | null = null;
 let tauriProcessModule: typeof import('@tauri-apps/plugin-process') | null = null;
+
+// Self-updating is intentionally limited to desktop Tauri builds. Android,
+// Capacitor, and the browser must never turn an update check into a download
+// or open an external browser tab; those builds are updated through their
+// normal distribution/deployment channel.
+function canUseNativeSelfUpdater(): boolean {
+  return isTauriEnvironment() && !isMobilePlatform();
+}
 
 async function getTauriUpdater() {
   if (!isTauriEnvironment()) return null;
@@ -181,7 +189,10 @@ class UpdateServiceClass {
       errorMessage: null,
       mandatory: false,
       checksumVerified: false,
-      isNativeUpdater: isTauriEnvironment(),
+      // A mobile Tauri shell is not able to apply desktop binaries in place.
+      // Keep the flag false there so update controls cannot render or start a
+      // download on Android/iOS/Capacitor builds.
+      isNativeUpdater: canUseNativeSelfUpdater(),
       downloadProgressPercent: 0,
       downloadedBytes: 0,
       totalBytes: 0,
@@ -191,25 +202,31 @@ class UpdateServiceClass {
       dismissedNotification: false,
     };
 
-    // Auto-detect native version if available in Tauri
-    this.fetchCurrentVersion().catch(() => {});
+    // Auto-detect the native version only where the in-place updater is
+    // supported. This avoids a /versions request during mobile/web startup.
+    if (canUseNativeSelfUpdater()) {
+      this.fetchCurrentVersion().catch(() => {});
+    }
 
     // Subscribe to downloadManager events as secondary fallback
     this.downloadUnsub = downloadManager.subscribe(() => {
       this.syncWithDownloadManager();
     });
 
-    // Auto check on startup after short delay
-    setTimeout(() => {
-      const cfg = getCachedUserSettings();
-      if (cfg.updates?.autoCheck ?? true) {
-        this.checkForUpdates(false).catch(() => {});
-      }
-    }, 1200);
+    // Auto checks are a desktop-Tauri concern. Mobile/Web updates are
+    // delivered by the store/site and must not trigger background downloads.
+    if (canUseNativeSelfUpdater()) {
+      setTimeout(() => {
+        const cfg = getCachedUserSettings();
+        if (cfg.updates?.autoCheck ?? true) {
+          this.checkForUpdates(false).catch(() => {});
+        }
+      }, 1200);
+    }
   }
 
   public async fetchCurrentVersion(): Promise<string> {
-    if (isTauriEnvironment()) {
+    if (canUseNativeSelfUpdater()) {
       try {
         const { getVersion } = await import('@tauri-apps/api/app');
         const ver = await getVersion();
@@ -290,6 +307,12 @@ class UpdateServiceClass {
     rawList: string[];
     isRollback?: boolean;
   } | null> {
+    // This verifier is only part of the desktop Tauri updater. Returning
+    // immediately on browser/mobile keeps a manual “check” from starting
+    // GitHub probes or exposing the archive download fallback on those
+    // platforms.
+    if (!canUseNativeSelfUpdater()) return null;
+
     try {
       console.log(`[AutoUpdater] Scanning GitHub repositories for user '${owner}' matching prefix '${prefix}'...`);
       // 1. Fetch public repositories of the user
@@ -489,6 +512,23 @@ class UpdateServiceClass {
       return this.getState();
     }
 
+    // Never run the PocketBase/GitHub fallback on Android, Capacitor, or the
+    // browser. That fallback eventually creates an <a download> element (and
+    // can open the system browser), while those platforms cannot apply a
+    // desktop binary in place.
+    if (!canUseNativeSelfUpdater()) {
+      this.updateState({
+        status: 'up_to_date',
+        availableUpdate: null,
+        downloadItem: null,
+        newVersion: undefined,
+        mandatory: false,
+        errorMessage: null,
+        dismissedNotification: true,
+      });
+      return this.getState();
+    }
+
     this.isChecking = true;
     await this.fetchCurrentVersion();
     const currentPlatform = detectOperatingSystem();
@@ -677,6 +717,19 @@ class UpdateServiceClass {
    * NEVER opens or requires running an external setup file or installer!
    */
   public async startDownload(): Promise<void> {
+    if (!canUseNativeSelfUpdater()) {
+      this.updateState({
+        status: 'up_to_date',
+        availableUpdate: null,
+        downloadItem: null,
+        newVersion: undefined,
+        mandatory: false,
+        errorMessage: null,
+        dismissedNotification: true,
+      });
+      return;
+    }
+
     this.abortRequested = false;
     this.updateState({
       dismissedNotification: false,
@@ -947,6 +1000,11 @@ class UpdateServiceClass {
    * Never asks the user to run setup.exe or msi!
    */
   public async installUpdate(): Promise<void> {
+    if (!canUseNativeSelfUpdater()) {
+      this.updateState({ status: 'up_to_date', errorMessage: null, dismissedNotification: true });
+      return;
+    }
+
     this.updateState({ status: 'installing' });
 
     // 1. Desktop native relaunch via Tauri Process
