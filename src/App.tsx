@@ -3,7 +3,7 @@ import { AnimatePresence, motion } from 'motion/react';
 import { pbService, mergeUserRecord } from './pocketbase';
 import { MessageDeletionService } from './services/messageDeletionService';
 import { getLanguageDictionary } from './services/localization';
-import { Bell, RefreshCw, Volume2, AlertTriangle, RotateCcw, Download, Sparkles } from 'lucide-react';
+import { Bell, Volume2 } from 'lucide-react';
 import { App as CapApp } from '@capacitor/app';
 import { User, Server, Channel, Message, Attachment, Translation, AppLanguageConfig, MusicTrack, NotificationItem, UnreadChannelInfo, Call } from './types';
 import { sendInAppNotification, requestNotificationPermission } from './lib/notifications';
@@ -15,10 +15,8 @@ import {
   saveCachedUserSettings,
   applySettingsToDocument,
   mergeWithDefaults,
-  resolveEffectiveTheme,
-  formatBytes
+  resolveEffectiveTheme
 } from './lib/userSettings';
-import { updateService, UpdateState } from './services/updateService';
 import { processAndOptimizeUserAvatar } from './services/avatarProcessor';
 import { backStackManager, useBackHandler } from './services/backStackManager';
 
@@ -738,18 +736,7 @@ export default function App() {
     };
   }, []);
 
-  // Keep updater state available for the manual settings screen without
-  // interrupting chat with automatic "ready to apply" notifications.
-  const [updateState, setUpdateState] = useState<UpdateState>(() => updateService.getState());
-
-  useEffect(() => {
-    const unsubscribe = updateService.subscribe((state) => {
-      setUpdateState(state);
-    });
-    return unsubscribe;
-  }, []);
-
-  // 1. Restore Auth Session on load & perform background update check
+  // 1. Restore Auth Session on load
   useEffect(() => {
     const user = pbService.getCurrentUser();
     const cachedSettings = getCachedUserSettings();
@@ -806,10 +793,6 @@ export default function App() {
       }).catch(() => {});
     }
 
-    // Trigger asynchronous background update check immediately on launch
-    updateService.checkForUpdates().catch((err) => {
-      console.warn('Background update check notice on startup:', err);
-    });
   }, []);
 
   // 1a. Listen for session expiration events and reset user state cleanly
@@ -4388,242 +4371,6 @@ export default function App() {
               )}
             </AnimatePresence>
 
-            {/* Global In-Place Auto-Updater Floating Action Banners */}
-            <AnimatePresence>
-              {/* 1. Downloading with live progress bar and exact byte size */}
-              {updateState.status === 'downloading' && !updateState.dismissedNotification && !updateState.mandatory && (
-                <motion.div
-                  initial={{ opacity: 0, y: -20, scale: 0.95 }}
-                  animate={{ opacity: 1, y: 0, scale: 1 }}
-                  exit={{ opacity: 0, y: -20, scale: 0.95 }}
-                  className="fixed top-12 right-6 z-[105] p-4 rounded-2xl bg-[var(--theme-bg-card)] text-[var(--theme-text-primary)] border border-accent/50 shadow-2xl backdrop-blur-md w-88 sm:w-96 space-y-3"
-                >
-                  <div className="flex items-start justify-between gap-2">
-                    <div className="flex items-center gap-2.5">
-                      <div className="w-8 h-8 rounded-xl bg-accent/20 border border-accent/40 flex items-center justify-center text-accent shrink-0">
-                        <RefreshCw className="w-4 h-4 animate-spin" />
-                      </div>
-                      <div className="min-w-0">
-                        <div className="text-xs font-black text-[var(--theme-text-primary)] truncate">
-                          {lang === 'ar'
-                            ? `جاري تنزيل التحديث v${updateState.newVersion || updateState.availableUpdate?.version || ''}`
-                            : `Downloading Update v${updateState.newVersion || updateState.availableUpdate?.version || ''}`}
-                        </div>
-                        <div className="text-[10px] text-[var(--theme-text-muted)] truncate">
-                          {lang === 'ar' ? 'استبدال وتثبيت داخلي في مكانه تلقائياً' : 'Applying files in-place internally'}
-                        </div>
-                      </div>
-                    </div>
-                    <button
-                      onClick={() => updateService.setNotificationDismissed(true)}
-                      className="p-1 text-[var(--theme-text-muted)] hover:text-[var(--theme-text-primary)] text-xs rounded-lg transition-colors cursor-pointer"
-                      title={lang === 'ar' ? 'تصغير' : 'Minimize'}
-                    >
-                      ✕
-                    </button>
-                  </div>
-
-                  {/* Progress Bar and Exact Size Info */}
-                  <div className="space-y-1.5">
-                    <div className="flex items-center justify-between text-[11px] font-bold">
-                      <span className="text-accent font-mono">{updateState.downloadProgressPercent}%</span>
-                      <span className="text-[var(--theme-text-muted)] font-mono text-[10px]">
-                        {updateState.totalBytes > 0
-                          ? `${formatBytes(updateState.downloadedBytes)} / ${formatBytes(updateState.totalBytes)}`
-                          : formatBytes(updateState.downloadedBytes)}
-                      </span>
-                    </div>
-                    <div className="w-full h-2 rounded-full bg-[var(--theme-bg-tertiary)] overflow-hidden">
-                      <div
-                        className="h-full bg-accent transition-all duration-300 rounded-full"
-                        style={{ width: `${Math.max(4, updateState.downloadProgressPercent)}%` }}
-                      />
-                    </div>
-                  </div>
-
-                  {/* Reset / Safe Interruption Controls */}
-                  <div className="flex items-center justify-between pt-1 border-t border-[var(--theme-border)]">
-                    <button
-                      onClick={() => updateService.cancelOrResetDownload()}
-                      className="px-2.5 py-1 rounded-lg bg-red-500/15 hover:bg-red-500/25 text-red-400 font-bold text-[10px] flex items-center gap-1 transition-all border-0 cursor-pointer"
-                    >
-                      <RotateCcw className="w-3 h-3" />
-                      <span>{lang === 'ar' ? 'إلغاء وإعادة الضبط' : 'Reset / Cancel'}</span>
-                    </button>
-                    <span className="text-[9px] text-[var(--theme-text-muted)]">
-                      {lang === 'ar' ? 'آمن وبدون أي ضرر للملفات' : 'Safe in-place stream'}
-                    </span>
-                  </div>
-                </motion.div>
-              )}
-
-              {/* 2. Interrupted or Error Notification Banner */}
-              {updateState.status === 'error' && !updateState.dismissedNotification && !updateState.mandatory && (
-                <motion.div
-                  initial={{ opacity: 0, y: -20, scale: 0.95 }}
-                  animate={{ opacity: 1, y: 0, scale: 1 }}
-                  exit={{ opacity: 0, y: -20, scale: 0.95 }}
-                  className="fixed top-12 right-6 z-[105] p-4 rounded-2xl bg-[var(--theme-bg-card)] text-[var(--theme-text-primary)] border border-red-500/50 shadow-2xl backdrop-blur-md w-88 sm:w-96 space-y-3"
-                >
-                  <div className="flex items-start justify-between gap-2">
-                    <div className="flex items-center gap-2.5">
-                      <div className="w-8 h-8 rounded-xl bg-red-500/20 border border-red-500/40 flex items-center justify-center text-red-400 shrink-0">
-                        <AlertTriangle className="w-4 h-4" />
-                      </div>
-                      <div>
-                        <div className="text-xs font-black text-red-400">
-                          {lang === 'ar' ? 'انقطع تنزيل التحديث' : 'Update Interrupted'}
-                        </div>
-                        <div className="text-[10px] text-[var(--theme-text-muted)]">
-                          {lang === 'ar' ? 'يمكنك المتابعة أو إعادة الضبط' : 'You can resume or reset safely'}
-                        </div>
-                      </div>
-                    </div>
-                    <button
-                      onClick={() => updateService.setNotificationDismissed(true)}
-                      className="p-1 text-[var(--theme-text-muted)] hover:text-[var(--theme-text-primary)] text-xs rounded-lg transition-colors cursor-pointer"
-                    >
-                      ✕
-                    </button>
-                  </div>
-
-                  <p className="text-[11px] text-[var(--theme-text-muted)] leading-relaxed">
-                    {updateState.errorMessage || (lang === 'ar' ? 'فشل الاتصال بخادم التحديثات أو انقطع الاتصال.' : 'Update stream was interrupted due to network or connection drop.')}
-                  </p>
-
-                  <div className="flex items-center gap-2 pt-1 border-t border-[var(--theme-border)]">
-                    <button
-                      onClick={() => updateService.retryOrResumeDownload()}
-                      className="flex-1 py-1.5 rounded-xl bg-accent hover:opacity-90 text-white font-bold text-[11px] flex items-center justify-center gap-1.5 transition-all border-0 cursor-pointer shadow-sm"
-                    >
-                      <RefreshCw className="w-3.5 h-3.5" />
-                      <span>{lang === 'ar' ? 'متابعة / إعادة المحاولة' : 'Resume / Retry'}</span>
-                    </button>
-                    <button
-                      onClick={() => updateService.cancelOrResetDownload()}
-                      className="px-3 py-1.5 rounded-xl bg-red-500/15 hover:bg-red-500/25 text-red-300 font-bold text-[11px] flex items-center gap-1 transition-all border-0 cursor-pointer"
-                    >
-                      <RotateCcw className="w-3.5 h-3.5" />
-                      <span>{lang === 'ar' ? 'إعادة ضبط' : 'Reset'}</span>
-                    </button>
-                  </div>
-                </motion.div>
-              )}
-
-              {/* 3. New Version Available (when manual or autoDownload is off) */}
-              {updateState.status === 'available' && !updateState.dismissedNotification && !updateState.mandatory && (
-                <motion.div
-                  initial={{ opacity: 0, y: -20, scale: 0.95 }}
-                  animate={{ opacity: 1, y: 0, scale: 1 }}
-                  exit={{ opacity: 0, y: -20, scale: 0.95 }}
-                  className="fixed top-12 right-6 z-[105] p-4 rounded-2xl bg-[var(--theme-bg-card)] text-[var(--theme-text-primary)] border border-accent/40 shadow-2xl backdrop-blur-md w-88 sm:w-96 space-y-3"
-                >
-                  <div className="flex items-start justify-between gap-2">
-                    <div className="flex items-center gap-2.5">
-                      <div className={`w-8 h-8 rounded-xl ${updateState.isRollback ? 'bg-amber-500/20 border border-amber-500/40 text-amber-400' : 'bg-accent/20 border border-accent/40 text-accent'} flex items-center justify-center shrink-0`}>
-                        {updateState.isRollback ? <RotateCcw className="w-4 h-4" /> : <Sparkles className="w-4 h-4" />}
-                      </div>
-                      <div>
-                        <div className="text-xs font-black text-[var(--theme-text-primary)]">
-                          {updateState.isRollback
-                            ? (lang === 'ar'
-                                ? `استعادة إصدار سابق آمن: v${updateState.newVersion || ''}`
-                                : `Safe Version Rollback: v${updateState.newVersion || ''}`)
-                            : (lang === 'ar'
-                                ? `تحديث جديد متاح: v${updateState.newVersion || updateState.availableUpdate?.version || ''}`
-                                : `New Update Available: v${updateState.newVersion || updateState.availableUpdate?.version || ''}`)}
-                        </div>
-                        <div className="text-[10px] text-[var(--theme-text-muted)]">
-                          {(() => {
-                            const isCurrentUserAdmin = currentUser?.role === 'admin' || currentUser?.role === 'half-admin' || (currentUser as any)?.isAdmin === true;
-                            if (updateState.isRollback) {
-                              if (isCurrentUserAdmin) {
-                                return lang === 'ar'
-                                  ? `الإصدار الحالي غير موجود على GitHub — تراجع إلى ${updateState.sourceRepo || 'المستودع الأخير'}`
-                                  : `Current version deleted from GitHub — rolling back to ${updateState.sourceRepo || 'last stable'}`;
-                              }
-                              return lang === 'ar'
-                                ? 'استعادة تلقائية لأعلى إصدار مستقر معتمد'
-                                : 'Safe rollback to previous verified stable release';
-                            }
-                            if (updateState.sourceRepo && isCurrentUserAdmin) {
-                              return `${lang === 'ar' ? 'من مستودع:' : 'From repo:'} ${updateState.sourceRepo}`;
-                            }
-                            if (updateState.totalBytes > 0) {
-                              return `${lang === 'ar' ? 'الحجم:' : 'Size:'} ${formatBytes(updateState.totalBytes)}`;
-                            }
-                            return lang === 'ar' ? 'تحديث رسمي معتمد' : 'Official verified release';
-                          })()}
-                        </div>
-                      </div>
-                    </div>
-                    <button
-                      onClick={() => updateService.setNotificationDismissed(true)}
-                      className="p-1 text-[var(--theme-text-muted)] hover:text-[var(--theme-text-primary)] text-xs rounded-lg transition-colors cursor-pointer"
-                    >
-                      ✕
-                    </button>
-                  </div>
-
-                  <div className="flex items-center gap-2 pt-1 border-t border-[var(--theme-border)]">
-                    <button
-                      onClick={() => updateService.startDownload()}
-                      className="flex-1 py-1.5 rounded-xl bg-accent hover:opacity-90 text-white font-bold text-[11px] flex items-center justify-center gap-1.5 transition-all border-0 cursor-pointer shadow-sm"
-                    >
-                      <Download className="w-3.5 h-3.5" />
-                      <span>{lang === 'ar' ? 'تنزيل وتطبيق داخلياً' : 'Download & Apply Internally'}</span>
-                    </button>
-                    <button
-                      onClick={() => updateService.setNotificationDismissed(true)}
-                      className="px-3 py-1.5 rounded-xl bg-[var(--theme-bg-tertiary)] hover:bg-[var(--theme-bg-secondary)] text-[var(--theme-text-muted)] font-bold text-[11px] transition-all border border-[var(--theme-border)] cursor-pointer"
-                    >
-                      {lang === 'ar' ? 'لاحقاً' : 'Later'}
-                    </button>
-                  </div>
-                </motion.div>
-              )}
-
-            </AnimatePresence>
-
-            {/* Mandatory Update Required Overlay Modal */}
-            {updateState.mandatory && (updateState.availableUpdate || updateState.newVersion) && updateState.status !== 'up_to_date' && (
-              <div className="fixed inset-0 z-[110] flex items-center justify-center p-4 bg-slate-950/95">
-                <div className="max-w-md w-full p-6 rounded-3xl bg-[var(--theme-bg-primary)] border border-accent/40 shadow-2xl space-y-4 text-center">
-                  <div className={`w-14 h-14 rounded-2xl ${updateState.isRollback ? 'bg-amber-500/20 border border-amber-500/40 text-amber-400' : 'bg-accent/20 border border-accent/40 text-accent'} flex items-center justify-center mx-auto`}>
-                    {updateState.isRollback ? <RotateCcw className="w-7 h-7" /> : <RefreshCw className="w-7 h-7 animate-spin-slow" />}
-                  </div>
-                  <h3 className="text-lg font-black text-[var(--theme-text-primary)]">
-                    {updateState.isRollback
-                      ? (lang === 'ar' ? 'استعادة إصدار سابق آمن' : 'Safe Version Rollback Required')
-                      : (lang === 'ar' ? 'تحديث إجباري مطلوب' : 'Mandatory Update Required')}
-                  </h3>
-                  <p className="text-xs text-[var(--theme-text-muted)] leading-relaxed">
-                    {updateState.isRollback
-                      ? (lang === 'ar'
-                          ? `الإصدار الحالي لم يعد متوفراً على GitHub. تم توجيه التطبيق بأمان للرجوع للإصدار السابق المستقر v${updateState.newVersion}.`
-                          : `The current version is no longer active on GitHub. To keep your app stable and functional, rolling back to v${updateState.newVersion} is required.`)
-                      : (lang === 'ar'
-                          ? `يتطلب الاستمرار في استخدام SirverData التحديث للإصدار v${updateState.newVersion || updateState.availableUpdate?.version}.`
-                          : `A critical update (v${updateState.newVersion || updateState.availableUpdate?.version}) is required to continue using SirverData.`)}
-                  </p>
-                  {updateState.status === 'downloaded' || updateState.status === 'ready_to_restart' ? (
-                    <button
-                      onClick={() => updateService.installUpdate()}
-                      className="w-full py-3 rounded-xl bg-emerald-500 hover:bg-emerald-600 text-white font-black text-xs cursor-pointer shadow-lg border-0 transition-all"
-                    >
-                      {lang === 'ar' ? 'إعادة التشغيل والتطبيق الآن' : 'Restart & Apply Now'}
-                    </button>
-                  ) : (
-                    <button
-                      onClick={() => updateService.startDownload()}
-                      className="w-full py-3 rounded-xl bg-accent hover:opacity-90 text-white font-black text-xs cursor-pointer shadow-lg border-0 transition-all"
-                    >
-                      {lang === 'ar' ? 'تنزيل التحديث الداخلي' : 'Download Internal Update'}
-                    </button>
-                  )}
-                </div>
-              </div>
-            )}
           </motion.div>
         )}
       </AnimatePresence>

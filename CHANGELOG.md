@@ -2,11 +2,11 @@
 
 ## [3.9-update-ui] - 2026-09-14
 ### Non-Intrusive Update Status
-- Removed the automatic "Update Ready to Install" notification toast and the
-  floating "Update Ready to Apply" banner so update readiness no longer covers
-  or interrupts the chat interface.
-- Kept updater state and controls available inside the manual Updates settings
-  page, including mandatory-update handling.
+- Removed all automatic updater overlays from the main chat interface, including
+  downloading, interrupted, available, ready-to-apply, and mandatory banners.
+- Removed the automatic update check and download from web app startup.
+- Kept updater controls available inside the manual Updates settings page so
+  updates can still be reviewed and applied without covering conversations.
 
 ## [3.9-production-source] - 2026-09-14
 ### Production Web Source and Deployment Readiness
