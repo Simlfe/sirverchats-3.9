@@ -173,7 +173,7 @@ export const SmartWebLinkPreview: React.FC<SmartWebLinkPreviewProps> = React.mem
   return (
     <div
       onClick={handleOpen}
-      className="group w-full max-w-md rounded-2xl p-3 border shadow-md my-1.5 flex flex-col gap-2 relative overflow-hidden transition-all cursor-pointer bg-[var(--theme-bg-card)] border-[var(--theme-border)] text-[var(--theme-text-primary)] hover:bg-[var(--theme-bg-tertiary)] hover:border-accent/40"
+      className="smart-web-link-preview-card group w-full max-w-md rounded-2xl p-3 border shadow-md my-1.5 flex flex-col gap-2 relative overflow-hidden transition-colors cursor-pointer bg-[var(--theme-bg-card)] border-[var(--theme-border)] text-[var(--theme-text-primary)] hover:bg-[var(--theme-bg-tertiary)] hover:border-accent/40"
     >
       {/* Top Domain & Badge Header */}
       <div className="flex items-center justify-between gap-2 border-b border-[var(--theme-border)] pb-2">
@@ -207,9 +207,11 @@ export const SmartWebLinkPreview: React.FC<SmartWebLinkPreviewProps> = React.mem
 
       {/* Main Content Area */}
       <div className="flex flex-col gap-2">
-        {/* Preview Image if available */}
-        {data?.image && !imgError && (
-          <div className="w-full h-40 sm:h-44 rounded-xl overflow-hidden bg-[var(--theme-bg-tertiary)] border border-[var(--theme-border)] relative shrink-0">
+        {/* Keep a fixed media slot even while metadata is loading (or when
+            the target has no image). Without this reservation, a late image
+            response changes the card height and shifts every following row. */}
+        <div className="w-full h-40 sm:h-44 rounded-xl overflow-hidden bg-[var(--theme-bg-tertiary)] border border-[var(--theme-border)] relative shrink-0 flex items-center justify-center">
+          {data?.image && !imgError ? (
             <img
               src={data.image}
               alt=""
@@ -219,20 +221,20 @@ export const SmartWebLinkPreview: React.FC<SmartWebLinkPreviewProps> = React.mem
               onError={() => setImgError(true)}
               referrerPolicy="no-referrer"
             />
-          </div>
-        )}
+          ) : (
+            <Globe className="w-10 h-10 text-accent/30" aria-hidden="true" />
+          )}
+        </div>
 
         <div className="flex items-start justify-between gap-3">
           <div className="flex flex-col gap-1 min-w-0 flex-1">
-            <span className="text-xs sm:text-sm font-extrabold text-[var(--theme-text-primary)] group-hover:text-accent transition-colors line-clamp-2 leading-snug">
+            <span className="text-xs sm:text-sm font-extrabold text-[var(--theme-text-primary)] group-hover:text-accent transition-colors line-clamp-2 leading-snug min-h-[2.25rem]">
               {titleDisplay}
             </span>
-            {data?.description && (
-              <p className="text-[11px] text-[var(--theme-text-muted)] line-clamp-2 leading-relaxed">
-                {data.description}
-              </p>
-            )}
-            <span className="text-[10px] font-mono text-[var(--theme-text-muted)] truncate opacity-80 pt-0.5">
+            <p className="text-[11px] text-[var(--theme-text-muted)] line-clamp-2 leading-relaxed min-h-[2rem]">
+              {data?.description || "\u00a0"}
+            </p>
+            <span className="text-[10px] font-mono text-[var(--theme-text-muted)] truncate opacity-80 pt-0.5 min-h-[1rem]">
               {data?.url || url}
             </span>
           </div>

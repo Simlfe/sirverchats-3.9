@@ -120,7 +120,7 @@ export const MessageLinkPreviewCard: React.FC<MessageLinkPreviewProps> = React.m
   // Render blocked card if NOT sharing the server
   if (!isSameServer) {
     return (
-      <div className="w-full max-w-md rounded-2xl p-3 border shadow-sm my-1.5 flex items-center gap-3 transition-all select-none bg-[var(--theme-bg-secondary)] border-[var(--theme-border)] text-[var(--theme-text-secondary)]">
+      <div className="message-link-preview-card w-full max-w-md min-h-[118px] rounded-2xl p-3 border shadow-sm my-1.5 flex items-center gap-3 transition-colors select-none bg-[var(--theme-bg-secondary)] border-[var(--theme-border)] text-[var(--theme-text-secondary)]">
         <div className="w-9 h-9 rounded-xl bg-amber-500/15 border border-amber-500/30 flex items-center justify-center shrink-0">
           <Lock className="w-4 h-4 text-amber-500" />
         </div>
@@ -151,10 +151,14 @@ export const MessageLinkPreviewCard: React.FC<MessageLinkPreviewProps> = React.m
     }
   };
 
+  // The target message is fetched asynchronously. Keep the preview's
+  // geometry stable while it changes from the loading state to the resolved
+  // state; otherwise every row below it (including date separators) moves
+  // when the sender/content arrives.
   return (
     <div
       onClick={handleJump}
-      className="w-full max-w-lg rounded-2xl p-3.5 border shadow-md my-2 transition-all cursor-pointer group bg-[var(--theme-bg-card)] border-[var(--theme-border)] text-[var(--theme-text-primary)] hover:bg-[var(--theme-bg-tertiary)] hover:border-accent/40"
+      className="message-link-preview-card w-full max-w-lg min-h-[118px] rounded-2xl p-3.5 border shadow-md my-2 transition-colors cursor-pointer group bg-[var(--theme-bg-card)] border-[var(--theme-border)] text-[var(--theme-text-primary)] hover:bg-[var(--theme-bg-tertiary)] hover:border-accent/40"
     >
       {/* Header Channel Badge & Jump Action */}
       <div className="flex items-center justify-between gap-2 border-b border-[var(--theme-border)] pb-2 mb-2">
