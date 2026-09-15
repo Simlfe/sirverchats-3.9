@@ -342,9 +342,30 @@ export const MediaProvider: React.FC<{
             stopDurationTimer();
           }
         } else if (event.state === 'accepted') {
-          // When recipient accepted, if current user is the caller, now connect caller into media room!
+          // A voice-room accept only acknowledges an already-connected room.
+          // A DM accept may start media only when this tab still owns the
+          // matching outgoing invite. This prevents delayed/stale accepts
+          // from starting a call after a reload or navigation.
           const activeOutgoing = outgoingCallRef.current;
-          const isCaller = (myId && callerId === myId) || (activeOutgoing && activeOutgoing.callId === event.callId);
+          const existingRoom = activeRoomRef.current;
+          const isVoiceRoomAcknowledgement =
+            event.roomType === 'voice_room' &&
+            existingRoom?.roomType === 'voice_room' &&
+            existingRoom.roomId === event.conversationId;
+
+          if (isVoiceRoomAcknowledgement) {
+            if (!acceptedCallIdsRef.current.has(event.callId)) {
+              acceptedCallIdsRef.current.add(event.callId);
+              setParticipants(realtimeMediaProvider.getParticipants());
+            }
+            return;
+          }
+
+          const isCaller = Boolean(
+            activeOutgoing &&
+            activeOutgoing.callId === event.callId &&
+            activeOutgoing.callerId === myId
+          );
 
           if (isCaller && activeUser) {
             if (settledCallIdsRef.current.has(event.callId)) return;
@@ -353,15 +374,6 @@ export const MediaProvider: React.FC<{
             }
             acceptedCallIdsRef.current.add(event.callId);
             setOutgoingCall(null);
-
-            // A voice-room invite is an acknowledgement from another
-            // participant, not a request to reconnect the caller. Keeping the
-            // existing LiveKit session preserves participants and duration.
-            const existingRoom = activeRoomRef.current;
-            if (event.roomType === 'voice_room' && existingRoom?.roomType === 'voice_room' && existingRoom.roomId === event.conversationId) {
-              setParticipants(realtimeMediaProvider.getParticipants());
-              return;
-            }
 
             const targetUser = activeOutgoing?.targetUser || event.targetUser;
             const config: RoomConfig = {
@@ -573,30 +585,16 @@ export const MediaProvider: React.FC<{
     [activeRoom, connectionState, isMuted, isDeafened, isCameraEnabled, isScreenSharing]
   );
 
-  // Voice Session Recovery Check (within 2-minute window)
+  // Do not automatically rejoin a voice room from local storage.  A stale
+  // recovery marker could start the microphone and LiveKit as soon as the app
+  // opened, even though the user had not chosen to call.  LiveKit itself
+  // handles transient reconnects while the app is open; a new app session
+  // must always require an explicit join/call action.
   useEffect(() => {
     if (!currentUser) return;
-    const session = voiceSessionRecovery.getValidSession();
-    if (!session || session.userId !== currentUser.id) {
-      voiceRecoveryAttemptedRef.current = null;
-      return;
-    }
-    if (voiceRecoveryAttemptedRef.current === session.channelId) return;
-    if (!activeRoom && !joiningRoomIdRef.current) {
-      voiceRecoveryAttemptedRef.current = session.channelId;
-      console.log(
-        `[VoiceRecovery] Restoring active voice session for channel "${session.channelId}" (joined ${Math.round(
-          (Date.now() - session.joinTimestamp) / 1000
-        )}s ago)`
-      );
-      const mockChannel: any = {
-        id: session.channelId,
-        name: session.channelName || 'Voice Channel',
-        server: session.serverId,
-      };
-      joinVoiceRoom(mockChannel, currentUser, session.mode).catch(() => {});
-    }
-  }, [currentUser, activeRoom, joinVoiceRoom]);
+    voiceSessionRecovery.clearSession();
+    voiceRecoveryAttemptedRef.current = null;
+  }, [currentUser]);
 
   // Start DM Call (1-to-1)
   const startDmCall = useCallback(

@@ -111,30 +111,12 @@ function VoicePanel({
     activeRoom.roomId !== channel.id &&
     connectionState === 'connected';
 
-  const hasAutoJoinedRef = useRef<Record<string, boolean>>({});
-
   useEffect(() => {
     const unsub = voicePresenceStore.subscribe(() => {
       setVoicePresenceTick((t) => t + 1);
     });
     return () => unsub();
   }, []);
-
-  // Auto-join on channel switch/click if not currently connected
-  useEffect(() => {
-    if (
-      channel &&
-      currentUser &&
-      !isConnectedToThisChannel &&
-      !isConnectingToThisChannel &&
-      !hasAutoJoinedRef.current[channel.id]
-    ) {
-      hasAutoJoinedRef.current[channel.id] = true;
-      joinVoiceRoom(channel, currentUser, 'voice').catch((err) => {
-        console.error('Failed auto-joining voice channel:', err);
-      });
-    }
-  }, [channel.id, isConnectedToThisChannel, isConnectingToThisChannel, currentUser, joinVoiceRoom]);
 
   const handleRetryPermissions = async () => {
     clearError();

@@ -563,34 +563,17 @@ class CallSignalingService {
 
       case 'call_accept': {
         const acceptCallId = data?.callId || (evt as any).callId;
-        if (this.activeCallEvent && (!acceptCallId || acceptCallId === this.activeCallEvent.callId)) {
-          this.clearOutgoingSoundTimer();
-          this.clearTimeoutTimer();
-          stopAllRingtones();
-          this.activeCallEvent = { ...this.activeCallEvent, state: 'accepted' };
-          this.notify(this.activeCallEvent);
-        } else if (acceptCallId) {
-          this.clearOutgoingSoundTimer();
-          this.clearTimeoutTimer();
-          stopAllRingtones();
-          this.notify({
-            callId: acceptCallId,
-            callerId: data?.callerId || '',
-            callerName: data?.callerName || '',
-            callerAvatar: '',
-            callerUser: data?.callerUser || ({ id: data?.callerId || '', username: data?.callerName || 'user', display_name: data?.callerName } as any),
-            targetUserId: user.id,
-            callType: data?.callType || 'voice',
-            conversationId: evt.channelId || data?.conversationId || '',
-            roomType: data?.roomType,
-            roomName: data?.roomName,
-            maxParticipants: data?.maxParticipants,
-            channelId: data?.channelId || evt.channelId || data?.conversationId || '',
-            serverId: data?.serverId,
-            state: 'accepted',
-            timestamp: Date.now(),
-          });
-        }
+        // An accept signal is meaningful only for a call this tab is
+        // currently ringing out.  The previous synthetic fallback treated a
+        // delayed/stale accept received after reload as a new call and caused
+        // the media provider to join LiveKit without user action.
+        if (!acceptCallId || !this.activeCallEvent || this.activeCallEvent.callId !== acceptCallId) return;
+        if (this.activeCallEvent.state !== 'ringing') return;
+        this.clearOutgoingSoundTimer();
+        this.clearTimeoutTimer();
+        stopAllRingtones();
+        this.activeCallEvent = { ...this.activeCallEvent, state: 'accepted' };
+        this.notify(this.activeCallEvent);
         break;
       }
 
