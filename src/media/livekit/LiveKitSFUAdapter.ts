@@ -10,6 +10,7 @@ import {
 } from '../../types/media';
 import { getServerMemberDisplayName, pbService } from '../../pocketbase';
 import liveKitManager from './LiveKitManager';
+import { liveKitIdentityForSession } from './livekitIdentity';
 
 export const LIVEKIT_DEFAULT_URL = liveKitManager['sfuUrl'];
 export const LIVEKIT_TOKEN_ENDPOINT = liveKitManager['tokenEndpoint'];
@@ -38,7 +39,11 @@ export class LiveKitSFUAdapter implements SFUProviderAdapter {
       getServerMemberDisplayName(member, roomConfig.user, roomConfig.serverId) ||
       roomConfig.user.display_name ||
       roomConfig.user.username;
-    await liveKitManager.getToken(roomConfig.user.id, displayName, roomName);
+    await liveKitManager.getToken(
+      liveKitIdentityForSession(roomConfig.user.id, roomConfig.sessionId),
+      displayName,
+      roomName,
+    );
   }
 
   public async joinSession(roomConfig: RoomConfig): Promise<void> {

@@ -23,6 +23,13 @@ export interface GatewayErrorShape {
   requestId?: string;
 }
 
+export interface ApiRequestOptions {
+  /** Maximum time for this read before the availability breaker is updated. */
+  timeoutMs?: number;
+  /** Bypass an open breaker for an explicit user retry. */
+  force?: boolean;
+}
+
 function gatewayBaseUrl(): string {
   const envValue = (import.meta as any)?.env?.VITE_API_V2_URL;
   return String(envValue || 'https://chat.sirverdata.top/api/v2').replace(/\/+$/, '');
@@ -67,7 +74,7 @@ export class ApiV2Client {
     this.getToken = provider;
   }
 
-  async request<T>(path: string, init: RequestInit = {}): Promise<T> {
+  async request<T>(path: string, init: RequestInit = {}, options: ApiRequestOptions = {}): Promise<T> {
     const method = (init.method || 'GET').toUpperCase();
     const bodyKey = typeof init.body === 'string' ? init.body : '';
     const key = `${method}:${this.baseUrl}${path}:${bodyKey}`;
@@ -90,11 +97,14 @@ export class ApiV2Client {
         error.code = 'INVALID_GATEWAY_RESPONSE';
         throw error;
       }
-    });
+    }, options);
   }
 
   bootstrap(serverId?: string | null): Promise<BootstrapResponse> {
-    return this.request<BootstrapResponse>(`/bootstrap${queryString({ serverId })}`);
+    // Bootstrap touches memberships and the user directory in one request.
+    // Give a healthy but busy home VPS a little more room than the generic
+    // outage deadline while still keeping an upper bound for a dead tunnel.
+    return this.request<BootstrapResponse>(`/bootstrap${queryString({ serverId })}`, {}, { timeoutMs: 6000 });
   }
 
   messages<T extends Message = Message>(kind: 'channel' | 'dm', id: string, limit = 30, cursor?: MessageCursor | null): Promise<MessagePage<T>> {
@@ -106,11 +116,11 @@ export class ApiV2Client {
       limit,
       beforeCreated: cursor?.created,
       beforeId: cursor?.id,
-    })}`);
+    })}`, {}, { timeoutMs: 8000 });
   }
 
   dms(): Promise<DmSummary[]> {
-    return this.request<DmSummary[]>('/dms');
+    return this.request<DmSummary[]>('/dms', {}, { timeoutMs: 6000 });
   }
 
   health(): Promise<{ status: string }> {

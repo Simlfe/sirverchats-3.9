@@ -471,7 +471,11 @@ export class RealtimeMediaProvider implements IRealtimeMediaProvider {
     // 1. Trigger SFU session join if adapter is attached FIRST so room.localParticipant is ready
     if (adapter) {
       try {
-        await adapter.joinSession(config);
+        // Pass the generated session id through to LiveKit.  Omitting it here
+        // made every device join with the bare PocketBase user id, so LiveKit
+        // evicted the previous connection as DUPLICATE_IDENTITY and the
+        // recovery timer kept reconnecting both clients.
+        await adapter.joinSession(roomConfigWithSession);
         const adapterState = adapter.getConnectionState();
         if (adapterState !== 'connected') {
           throw new Error(`Media server did not reach a connected state (${adapterState})`);

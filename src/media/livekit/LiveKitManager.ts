@@ -14,6 +14,7 @@ import {
   createLocalAudioTrack,
   createLocalVideoTrack,
   VideoQuality,
+  DisconnectReason,
   setLogLevel,
 } from 'livekit-client';
 
@@ -31,6 +32,7 @@ import {
 import { getServerMemberAvatarUrl, getServerMemberDisplayName, pbService } from '../../pocketbase';
 import ENDPOINTS from '../../config/endpoints';
 import { audioMixer } from '../../services/audioMixer';
+import { liveKitIdentityForSession, userIdFromLiveKitIdentity } from './livekitIdentity';
 import voicePresenceStore from '../../services/voicePresenceStore';
 
 export const LIVEKIT_DEFAULT_URL = ENDPOINTS.LIVEKIT_URL;
@@ -191,6 +193,21 @@ export class LiveKitManager {
   public getRoomName(config: RoomConfig): string {
     if (config.callId) return `call_${config.callId}`;
     return `room_${config.roomId}`;
+  }
+
+  /** Return the account id represented by a LiveKit participant identity. */
+  private canonicalUserId(identity: string): string {
+    return userIdFromLiveKitIdentity(identity);
+  }
+
+  /**
+   * LiveKit requires one identity per active connection.  Keep the account id
+   * as the prefix so the rest of the app can still resolve users and server
+   * members, while the session suffix prevents another device from evicting
+   * this connection.
+   */
+  private sessionIdentity(config: RoomConfig): string {
+    return liveKitIdentityForSession(config.user.id, config.sessionId);
   }
 
   /**
@@ -428,7 +445,7 @@ export class LiveKitManager {
       this.startTokenRefreshTimer();
       this.setConnectionState('joining');
 
-      const identity = roomConfig.user.id;
+      const identity = this.sessionIdentity(roomConfig);
       const member = roomConfig.serverId ? pbService.getCachedServerMember(roomConfig.serverId, roomConfig.user.id) : null;
       const displayName =
         getServerMemberDisplayName(member, roomConfig.user, roomConfig.serverId) ||
@@ -491,7 +508,11 @@ export class LiveKitManager {
         this.syncAllParticipants();
       } catch (connErr: any) {
         console.warn('[LiveKitManager] LiveKit connection attempt failed:', connErr?.message || connErr);
-        const shouldKeepSessionForReconnect = wasPreviouslyConnected && this.isExplicitlyJoined && this.currentRoomConfig?.roomId === roomConfig.roomId;
+        const duplicateIdentity =
+          connErr?.reason === DisconnectReason.DUPLICATE_IDENTITY ||
+          Number(connErr?.reason) === 2 ||
+          /duplicate identity|already connected|identity.*in use/i.test(String(connErr?.message || ''));
+        const shouldKeepSessionForReconnect = !duplicateIdentity && wasPreviouslyConnected && this.isExplicitlyJoined && this.currentRoomConfig?.roomId === roomConfig.roomId;
         if (this.room) {
           try {
             this.room.removeAllListeners();
@@ -525,6 +546,21 @@ export class LiveKitManager {
             throw new Error('LiveKit connection attempt was cancelled');
           }
           return;
+        }
+
+        if (duplicateIdentity) {
+          this.isExplicitlyJoined = false;
+          this.wasConnected = false;
+          this.currentRoomConfig = null;
+          this.stopTokenRefreshTimer();
+          this.setConnectionState('failed');
+          const duplicateError: MediaError = {
+            code: 'SFU_UNAVAILABLE',
+            message: 'This account is already connected to the call on another device.',
+            details: { reason: 'DUPLICATE_IDENTITY', cause: connErr },
+          };
+          this.emit({ type: 'error', error: duplicateError });
+          throw new Error(duplicateError.message);
         }
 
         const mediaErr: MediaError = {
@@ -1257,8 +1293,9 @@ export class LiveKitManager {
   private async checkAndRefreshToken() {
     if (!this.currentRoomConfig) return;
     const roomName = this.getRoomName(this.currentRoomConfig);
-    const identity = this.currentRoomConfig.user.id;
-    const member = this.currentRoomConfig.serverId ? pbService.getCachedServerMember(this.currentRoomConfig.serverId, identity) : null;
+    const identity = this.sessionIdentity(this.currentRoomConfig);
+    const accountId = this.currentRoomConfig.user.id;
+    const member = this.currentRoomConfig.serverId ? pbService.getCachedServerMember(this.currentRoomConfig.serverId, accountId) : null;
     const displayName =
       getServerMemberDisplayName(member, this.currentRoomConfig.user, this.currentRoomConfig.serverId) ||
       this.currentRoomConfig.user.display_name ||
@@ -1423,6 +1460,7 @@ export class LiveKitManager {
       const isScreenAudio = publication.source === Track.Source.ScreenShareAudio || publication.trackName === 'screen_share_audio';
       const source: 'voice' | 'screen' = isScreenAudio ? 'screen' : 'voice';
       const key = `${participant.identity}_${source}`;
+      const userId = this.canonicalUserId(participant.identity);
 
       if (!this.attachedAudioElements.has(key)) {
         const el = track.attach();
@@ -1432,15 +1470,15 @@ export class LiveKitManager {
         el.play().catch((playErr) => {
           console.warn('[LiveKitManager] Audio element play error:', playErr);
         });
-        this.attachedAudioElements.set(key, { el, source, userId: participant.identity });
+        this.attachedAudioElements.set(key, { el, source, userId });
         this.updateAllAudioElementVolumes();
       }
 
       const mediaStream = new MediaStream([mst]);
-      console.log(`[LIFECYCLE_AUDIT] 8. HTMLAudioElement attachment: userId=${participant.identity}, trackType=${isScreenAudio ? 'screen' : 'audio'}, trackId=${mst.id}`);
+      console.log(`[LIFECYCLE_AUDIT] 8. HTMLAudioElement attachment: userId=${userId}, trackType=${isScreenAudio ? 'screen' : 'audio'}, trackId=${mst.id}`);
       this.emit({
         type: 'track_added',
-        userId: participant.identity,
+        userId,
         trackType: isScreenAudio ? 'screen' : 'audio',
         stream: mediaStream,
       });
@@ -1453,11 +1491,11 @@ export class LiveKitManager {
         this.monitorScreenShareFrames(publication, participant, track);
       }
 
-      console.log(`[LIFECYCLE_AUDIT] 8. HTMLVideoElement attachment: userId=${participant.identity}, trackType=${trackType}, trackId=${mst.id}`);
+      console.log(`[LIFECYCLE_AUDIT] 8. HTMLVideoElement attachment: userId=${this.canonicalUserId(participant.identity)}, trackType=${trackType}, trackId=${mst.id}`);
 
       this.emit({
         type: 'track_added',
-        userId: participant.identity,
+        userId: this.canonicalUserId(participant.identity),
         trackType,
         stream: mediaStream,
       });
@@ -1567,10 +1605,10 @@ export class LiveKitManager {
         }
       });
       const mapped = this.mapParticipantToMediaParticipant(participant, false);
-      this.participants.set(participant.identity, mapped);
+      this.participants.set(mapped.userId, mapped);
       this.emit({
         type: 'participant_joined',
-        userId: participant.identity,
+        userId: mapped.userId,
         participant: mapped,
       });
     });
@@ -1590,7 +1628,7 @@ export class LiveKitManager {
       });
       this.emit({
         type: 'participant_left',
-        userId: participant.identity,
+        userId: this.canonicalUserId(participant.identity),
       });
     });
 
@@ -1641,14 +1679,14 @@ export class LiveKitManager {
           }
           this.emit({
             type: 'track_removed',
-            userId: participant.identity,
+            userId: this.canonicalUserId(participant.identity),
             trackType: isScreenAudio ? 'screen' : 'audio',
           });
         } else if (track.kind === Track.Kind.Video) {
           const trackType = this.isScreenShareVideoTrack(publication, track) ? 'screen' : 'video';
           this.emit({
             type: 'track_removed',
-            userId: participant.identity,
+            userId: this.canonicalUserId(participant.identity),
             trackType,
           });
         }
@@ -1668,7 +1706,7 @@ export class LiveKitManager {
         const trackType = this.isScreenShareVideoTrack(publication, publication.track) ? 'screen' : 'video';
         this.emit({
           type: 'track_added',
-          userId: participant.identity,
+          userId: this.canonicalUserId(participant.identity),
           trackType,
           stream: mediaStream,
         });
@@ -1704,20 +1742,22 @@ export class LiveKitManager {
     });
 
     room.on(RoomEvent.ActiveSpeakersChanged, (speakers: Participant[]) => {
-      const activeIds = new Set(speakers.map((s) => s.identity));
+      const activeIds = new Set(speakers.map((s) => this.canonicalUserId(s.identity)));
       if (this.room) {
         this.room.remoteParticipants.forEach((p) => {
+          const userId = this.canonicalUserId(p.identity);
           this.emit({
             type: 'speaking_changed',
-            userId: p.identity,
-            data: { isSpeaking: activeIds.has(p.identity) },
+            userId,
+            data: { isSpeaking: activeIds.has(userId) },
           });
         });
         if (this.room.localParticipant) {
+          const userId = this.canonicalUserId(this.room.localParticipant.identity);
           this.emit({
             type: 'speaking_changed',
-            userId: this.room.localParticipant.identity,
-            data: { isSpeaking: activeIds.has(this.room.localParticipant.identity) },
+            userId,
+            data: { isSpeaking: activeIds.has(userId) },
           });
         }
       }
@@ -1769,6 +1809,38 @@ export class LiveKitManager {
     room.on(RoomEvent.Disconnected, (reason) => {
       if (this.room !== room) return;
       console.warn('[LIFECYCLE_AUDIT] Disconnected from LiveKit room. Reason:', reason);
+
+      // A duplicate identity is terminal for this connection. Retrying with
+      // the same credentials only evicts the other device and creates an
+      // endless connect/disconnect loop. Session-scoped identities should
+      // prevent this in normal operation, but treating the server signal as
+      // terminal also protects older clients and stale browser tabs.
+      const duplicateIdentity = reason === DisconnectReason.DUPLICATE_IDENTITY || Number(reason) === 2;
+      if (duplicateIdentity) {
+        this.isExplicitlyJoined = false;
+        this.wasConnected = false;
+        this.reconnectAttempts = 0;
+        if (this.reconnectTimer) {
+          clearTimeout(this.reconnectTimer);
+          this.reconnectTimer = null;
+        }
+        this.stopTokenRefreshTimer();
+        this.stopPingMonitor();
+        this.currentRoomConfig = null;
+        this.participants.clear();
+        if (this.room === room) this.room = null;
+        this.setConnectionState('failed');
+        this.emit({
+          type: 'error',
+          error: {
+            code: 'SFU_UNAVAILABLE',
+            message: 'This account is already connected to the call on another device.',
+            details: { reason: 'DUPLICATE_IDENTITY' },
+          },
+        });
+        return;
+      }
+
       if (this.isExplicitlyJoined && this.currentRoomConfig && this.wasConnected) {
         this.setConnectionState('reconnecting');
         this.scheduleReconnect(room, reason);
@@ -1822,7 +1894,7 @@ export class LiveKitManager {
         this.participants.set(mapped.userId, mapped);
         this.emit({
           type: 'participant_joined',
-          userId: p.identity,
+          userId: mapped.userId,
           participant: mapped,
         });
 
@@ -1856,10 +1928,10 @@ export class LiveKitManager {
   private emitParticipantUpdate(participant: Participant) {
     const isLocal = participant instanceof LocalParticipant;
     const mapped = this.mapParticipantToMediaParticipant(participant, isLocal);
-    this.participants.set(participant.identity, mapped);
+    this.participants.set(mapped.userId, mapped);
     this.emit({
       type: 'participant_updated',
-      userId: participant.identity,
+      userId: mapped.userId,
       patch: mapped,
     });
   }
@@ -1867,16 +1939,17 @@ export class LiveKitManager {
   private mapParticipantToMediaParticipant(p: Participant, isLocal: boolean): MediaParticipant {
     const roomId = this.currentRoomConfig?.roomId || 'unknown';
     const serverId = this.currentRoomConfig?.serverId;
+    const userId = this.canonicalUserId(p.identity);
 
     let member = null;
     if (serverId) {
-      member = pbService.getCachedServerMember(serverId, p.identity);
+      member = pbService.getCachedServerMember(serverId, userId);
     }
 
-    const cachedUser = pbService.getCachedUser(p.identity);
-    const userRef = (this.currentRoomConfig?.user?.id === p.identity
+    const cachedUser = pbService.getCachedUser(userId);
+    const userRef = (this.currentRoomConfig?.user?.id === userId
       ? this.currentRoomConfig.user
-      : cachedUser || { id: p.identity, username: p.identity }) as any;
+      : cachedUser || { id: userId, username: userId }) as any;
 
     const displayName =
       (member && member.member_name) ||
@@ -1884,7 +1957,7 @@ export class LiveKitManager {
       p.name ||
       getServerMemberDisplayName(member, userRef, serverId) ||
       userRef.username ||
-      p.identity;
+      userId;
 
     const avatar = getServerMemberAvatarUrl(member, userRef, serverId) || (userRef.avatar ? (userRef.avatar.startsWith('http') || userRef.avatar.startsWith('blob:') || userRef.avatar.startsWith('data:') ? userRef.avatar : `${pbService.getServerUrl()}/api/files/users/${userRef.id}/${userRef.avatar}`) : '');
 
@@ -1922,7 +1995,7 @@ export class LiveKitManager {
       }
     } else {
       // For remote participants before audio publication syncs, check voicePresenceStore
-      const pres = voicePresenceStore.getChannelParticipants(roomId).find((x) => x.userId === p.identity);
+      const pres = voicePresenceStore.getChannelParticipants(roomId).find((x) => x.userId === userId);
       if (pres !== undefined) {
         isMuted = pres.isMuted;
       } else {
@@ -1944,8 +2017,8 @@ export class LiveKitManager {
     });
 
     return {
-      userId: p.identity,
-      username: userRef.username || p.identity,
+      userId,
+      username: userRef.username || userId,
       displayName,
       avatar,
       isMuted,
@@ -1955,11 +2028,11 @@ export class LiveKitManager {
       isScreenSharing,
       connectionState: 'connected',
       facingMode: isLocal ? this.currentFacingMode : undefined,
-      volume: audioMixer.getParticipantVolume(p.identity),
+      volume: audioMixer.getParticipantVolume(userId),
       roomId,
       userRef,
       joinedAt: p.joinedAt ? p.joinedAt.getTime() : Date.now(),
-      pingMs: Math.max(5, this.currentRttMs + (p.identity.charCodeAt(0) % 7) - 3),
+      pingMs: Math.max(5, this.currentRttMs + (userId.charCodeAt(0) % 7) - 3),
     };
   }
 
@@ -2020,10 +2093,12 @@ export class LiveKitManager {
     if (!this.room) return null;
 
     let targetParticipant: Participant | undefined;
-    if (this.room.localParticipant?.identity === userId) {
+    if (this.room.localParticipant && this.canonicalUserId(this.room.localParticipant.identity) === userId) {
       targetParticipant = this.room.localParticipant;
     } else {
-      targetParticipant = this.room.remoteParticipants?.get(userId);
+      targetParticipant = Array.from(this.room.remoteParticipants?.values?.() || []).find(
+        (participant) => this.canonicalUserId(participant.identity) === userId,
+      );
     }
 
     if (!targetParticipant) return null;

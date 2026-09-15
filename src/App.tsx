@@ -4059,26 +4059,33 @@ export default function App() {
         onOpenSettings={() => setShowSettings(true)}
         isConnected={backendStatus === 'online'}
       />
-      {currentUser && backendStatus !== 'online' && (
-        <div
-          role="status"
-          aria-live="polite"
-          className={`shrink-0 w-full px-3 py-1.5 flex items-center justify-center gap-2 text-[11px] font-semibold border-b ${backendStatus === 'offline' ? 'bg-rose-500/10 border-rose-400/20 text-rose-300' : 'bg-amber-500/10 border-amber-400/20 text-amber-300'}`}
-        >
-          <span className={`w-1.5 h-1.5 rounded-full ${backendStatus === 'offline' ? 'bg-rose-400' : 'bg-amber-400'} animate-pulse`} />
-          <span>
-            {backendStatus === 'offline'
-              ? (lang === 'ar' ? 'الخدمة غير متاحة — يتم عرض البيانات المحفوظة' : 'Chat service unavailable — showing saved data')
-              : (lang === 'ar' ? 'اتصال متدهور — يتم تحديث البيانات في الخلفية' : 'Connection degraded — refreshing in the background')}
-          </span>
-          {backendError && <span className="hidden sm:inline opacity-70 truncate max-w-[260px]">{backendError}</span>}
-          <button
-            type="button"
-            onClick={retryBackendReads}
-            className="px-2 py-0.5 rounded-md border border-current/30 hover:bg-white/10 cursor-pointer"
-          >
-            {lang === 'ar' ? 'إعادة المحاولة' : 'Retry'}
-          </button>
+      {currentUser && (
+        // Keep a stable status slot in the app shell.  Availability changes
+        // must not insert/remove a row above the feed, which was the source
+        // of the visible chat jump/shake while a request timed out.
+        <div className="relative z-20 h-8 shrink-0 w-full">
+          {backendStatus !== 'online' && (
+            <div
+              role="status"
+              aria-live="polite"
+              className={`h-full w-full px-3 py-1.5 flex items-center justify-center gap-2 text-[11px] font-semibold border-b ${backendStatus === 'offline' ? 'bg-rose-500/10 border-rose-400/20 text-rose-300' : 'bg-amber-500/10 border-amber-400/20 text-amber-300'}`}
+            >
+              <span className={`w-1.5 h-1.5 rounded-full ${backendStatus === 'offline' ? 'bg-rose-400' : 'bg-amber-400'} animate-pulse`} />
+              <span>
+                {backendStatus === 'offline'
+                  ? (lang === 'ar' ? 'الخدمة غير متاحة — يتم عرض البيانات المحفوظة' : 'Chat service unavailable — showing saved data')
+                  : (lang === 'ar' ? 'اتصال متدهور — يتم تحديث البيانات في الخلفية' : 'Connection degraded — refreshing in the background')}
+              </span>
+              {backendError && <span className="hidden sm:inline opacity-70 truncate max-w-[260px]">{backendError}</span>}
+              <button
+                type="button"
+                onClick={retryBackendReads}
+                className="px-2 py-0.5 rounded-md border border-current/30 hover:bg-white/10 cursor-pointer"
+              >
+                {lang === 'ar' ? 'إعادة المحاولة' : 'Retry'}
+              </button>
+            </div>
+          )}
         </div>
       )}
       <div className="flex-1 flex w-full min-h-0 overflow-hidden relative">
