@@ -220,6 +220,27 @@ export const MediaProvider: React.FC<{
           setConnectionState(evt.connectionState);
         } else if (evt.type === 'error' && evt.error) {
           setError(evt.error);
+
+          // A terminal SFU failure must clear the optimistic call state.  If
+          // the LiveKit room was evicted (for example by a duplicate identity
+          // from an older client), leaving this state mounted lets the
+          // recovery effect immediately start another connect attempt and the
+          // UI gets stuck cycling between connecting and disconnected.
+          const details = evt.error.details as any;
+          const terminalSfuFailure =
+            (evt.error.code === 'SFU_UNAVAILABLE' && realtimeMediaProvider.getConnectionState() === 'failed') ||
+            details?.reason === 'DUPLICATE_IDENTITY' ||
+            /already connected to the call on another device/i.test(evt.error.message || '');
+          if (terminalSfuFailure) {
+            voiceSessionRecovery.clearSession();
+            setActiveRoom(null);
+            setParticipants([]);
+            setConnectionState('failed');
+            setOutgoingCall(null);
+            setIncomingCall(null);
+            stopDurationTimer();
+            realtimeMediaProvider.leaveRoom().catch(() => {});
+          }
         } else if (evt.type === 'room_left') {
           setActiveRoom(null);
           setParticipants([]);
