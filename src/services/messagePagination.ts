@@ -32,7 +32,17 @@ export function dedupeMessages(messages: Message[], maxItems?: number): Message[
   for (const message of messages) {
     if (!message?.id || message.deleted || message.deleted_at) continue;
     const existing = byId.get(message.id);
-    if (!existing || (!message.is_pending && existing.is_pending)) {
+    // A cached row can have the same id as a freshly fetched row but lack
+    // sender/reply/attachment expansion. Prefer the richer incoming record so
+    // a cache-first refresh can hydrate names and media without remounting the
+    // feed. Newer edits also replace an older cached copy.
+    const existingSender = existing?.expand?.sender || (existing as any)?.sender && typeof (existing as any).sender !== 'string';
+    const incomingSender = message.expand?.sender || (message as any)?.sender && typeof (message as any).sender !== 'string';
+    const existingAttachmentCount = ((existing as any)?.attachments || existing?.expand?.['attachments(message)'] || existing?.expand?.attachments_via_message || []).length;
+    const incomingAttachmentCount = ((message as any)?.attachments || message.expand?.['attachments(message)'] || message.expand?.attachments_via_message || []).length;
+    const incomingIsRicher = Boolean(incomingSender && !existingSender) || incomingAttachmentCount > existingAttachmentCount || Boolean(message.reply_to && !existing?.reply_to);
+    const incomingIsNewer = Boolean(message.updated && existing?.updated && message.updated > existing.updated);
+    if (!existing || (!message.is_pending && existing.is_pending) || (!message.is_pending && !existing?.is_pending && (incomingIsRicher || incomingIsNewer))) {
       byId.set(message.id, message);
     }
     const sender = message.sender || message.expand?.sender?.id || '';

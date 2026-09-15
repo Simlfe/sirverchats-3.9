@@ -9,7 +9,6 @@ import wsService from './services/websocket';
 import ENDPOINTS from './config/endpoints';
 import APP_URLS from './config/urls';
 import { buildOlderMessageFilter, cursorFromMessage, INITIAL_MESSAGE_PAGE_SIZE } from './services/messagePagination';
-import { backendAvailability } from './services/backendAvailability';
 
 export class PocketBaseUnavailableError extends Error {
   readonly code = 'BACKEND_UNAVAILABLE';
@@ -1383,10 +1382,10 @@ class PocketBaseService {
       return servers.filter((s) => !isDmServer(s));
     } catch (err) {
       console.error('Failed to fetch servers:', err);
-      // Do not issue a broad public-server scan after a timeout, Cloudflare
-      // 5xx/530, or other transport error. App.tsx retains the cached list and
-      // exposes the degraded/offline state instead.
-      backendAvailability.markFailure(err);
+      // Server bootstrap is an enhancement when the v2 gateway is enabled.
+      // Keep gateway availability owned by the v2 client; a background
+      // compatibility read must not paint the app offline while cached data is
+      // still usable.
       return [];
     }
   }
@@ -1796,7 +1795,7 @@ class PocketBaseService {
       }
     } catch (err) {
       console.error('Failed to fetch channels:', err);
-      backendAvailability.markFailure(err);
+      // Preserve cached channels without changing the global gateway status.
       return this.getCachedChannels(serverId);
     }
   }
@@ -1867,7 +1866,6 @@ class PocketBaseService {
         );
       }
     } catch (err: any) {
-      backendAvailability.markFailure(err);
       throw new PocketBaseUnavailableError(
         err?.message || 'The chat service is temporarily unavailable',
         err?.status,
@@ -1890,7 +1888,6 @@ class PocketBaseService {
     const pageItems = rawItems.slice(0, safeLimit).reverse();
     pageItems.forEach((message) => this.cacheMessageRecord(message));
     const nextCursor = pageItems.length > 0 ? cursorFromMessage(pageItems[0]) : null;
-    backendAvailability.markSuccess();
     return { items: pageItems, nextCursor, hasMore };
   }
 
@@ -1937,7 +1934,6 @@ class PocketBaseService {
         );
       }
     } catch (err: any) {
-      backendAvailability.markFailure(err);
       throw new PocketBaseUnavailableError(
         err?.message || 'The chat service is temporarily unavailable',
         err?.status,
@@ -1975,7 +1971,6 @@ class PocketBaseService {
     });
     const pageItems = rawItems.slice(0, safeLimit).reverse();
     pageItems.forEach((message) => this.cacheMessageRecord(message));
-    backendAvailability.markSuccess();
     return {
       items: pageItems,
       nextCursor: pageItems.length > 0 ? cursorFromMessage(pageItems[0]) : null,
@@ -3429,7 +3424,8 @@ class PocketBaseService {
       } catch (error) {
         // A profile read is an enhancement. Never replace a usable cached DM
         // list with a broad fallback after a network/tunnel failure.
-        if (!isSchemaCompatibilityError(error)) backendAvailability.markFailure(error);
+        // User profiles are enrichment data. Do not let a failed background
+        // profile read change the v2 gateway availability indicator.
         return ids.map((id) => cachedById.get(id)).filter(Boolean) as User[];
       }
     })();
@@ -3730,12 +3726,10 @@ class PocketBaseService {
         this.privateChatServerCache.set(s.id, s);
       });
       try { localStorage.setItem(`cached_pcs_${currentId}`, JSON.stringify(validServers)); } catch (e) {}
-      backendAvailability.markSuccess();
       return validServers;
     } catch (membershipError) {
       if (!isSchemaCompatibilityError(membershipError)) {
         console.warn('Failed to fetch private chat memberships:', membershipError);
-        backendAvailability.markFailure(membershipError);
         return cachedServers;
       }
       membershipSchemaAvailable = false;
@@ -3757,7 +3751,6 @@ class PocketBaseService {
       } catch (usersFilterErr) {
         if (!isSchemaCompatibilityError(usersFilterErr)) {
           console.warn('Failed to fetch private chat servers:', usersFilterErr);
-          backendAvailability.markFailure(usersFilterErr);
           return cachedServers;
         }
         try {
@@ -3770,7 +3763,6 @@ class PocketBaseService {
           );
         } catch (userColumnsErr) {
           if (!isSchemaCompatibilityError(userColumnsErr)) {
-            backendAvailability.markFailure(userColumnsErr);
             return cachedServers;
           }
         }
@@ -3782,7 +3774,6 @@ class PocketBaseService {
         this.privateChatServerCache.set(s.id, s);
       });
       try { localStorage.setItem(`cached_pcs_${currentId}`, JSON.stringify(list)); } catch (e) {}
-      backendAvailability.markSuccess();
       return list;
     }
 
