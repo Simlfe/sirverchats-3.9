@@ -920,11 +920,16 @@ html[data-message-density="spacious"] .app-message-text {
   overflow-anchor: auto !important;
   -webkit-overflow-scrolling: touch;
   scroll-behavior: auto;
-  will-change: scroll-position;
+  /* Promoting a scroll container with `will-change: scroll-position` makes
+     Chromium/WebView repaint fractional spacer offsets while the message
+     window changes. Let the browser keep the native scrolling layer instead. */
+  contain: layout style;
 }
 
 .chat-message-row {
-  /* Keep standard layout to ensure exact scroll height calculations during prepend */
+  /* Isolate row layout so a late avatar/preview paint cannot invalidate the
+     entire feed and visibly wobble neighbouring date separators. */
+  contain: layout style;
 }
 
 .media-preview-container {

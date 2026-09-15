@@ -774,6 +774,19 @@ function ChatPanel({
   const lastScrollTopRef = useRef<number>(0);
   const isAtBottomRef = useRef<boolean>(true);
   const hasInitialScrolledChanIdRef = useRef<string | null>(null);
+  // Initial positioning must be a one-shot operation.  Previously the
+  // hydration effect and the virtualized feed could both force `scrollTop`
+  // while sender/media data was arriving, which made every date divider and
+  // message row visibly jump.  Keep a per-conversation marker so richer
+  // realtime/cache records never re-run the initial scroll.
+  const initialScrollAppliedChannelRef = useRef<string | null>(null);
+  const initialScrollCorrectionRafRef = useRef<number | null>(null);
+  useEffect(() => () => {
+    if (initialScrollCorrectionRafRef.current !== null) {
+      cancelAnimationFrame(initialScrollCorrectionRafRef.current);
+      initialScrollCorrectionRafRef.current = null;
+    }
+  }, []);
   const panelResizeAnchorRef = useRef<{
     anchorMsgId: string;
     anchorOffsetTop: number;
@@ -842,6 +855,11 @@ function ChatPanel({
       scrollAnimationTimeoutRef.current = null;
     }
 
+    if (source === "initial" && initialScrollCorrectionRafRef.current !== null) {
+      cancelAnimationFrame(initialScrollCorrectionRafRef.current);
+      initialScrollCorrectionRafRef.current = null;
+    }
+
     if (source === "user") {
       isManualScrollingRef.current = true;
       setShowScrollToBottom(false);
@@ -890,8 +908,9 @@ function ChatPanel({
     }
 
     if (source === "initial") {
+      const channelIdAtStart = channel.id;
       const applyInitialScroll = () => {
-        if (!scrollRef.current) return;
+        if (!scrollRef.current || prevChannelIdRef.current !== channelIdAtStart) return;
         const scrollEl = scrollRef.current;
         const maxScrollTop = Math.max(
           0,
@@ -912,10 +931,33 @@ function ChatPanel({
 
       applyInitialScroll();
       setIsInitialLoadReady(true);
-      requestAnimationFrame(() => {
-        applyInitialScroll();
-        if (initialChannelLoadLockRef.current.chanId === channel.id) {
-          initialChannelLoadLockRef.current.active = false;
+      // Release the initial lock immediately.  A single guarded correction in
+      // the next frame handles a scrollbar/layout measurement that changed
+      // during this paint, without repeatedly writing scrollTop on every
+      // message/profile/media update.
+      if (initialChannelLoadLockRef.current.chanId === channelIdAtStart) {
+        initialChannelLoadLockRef.current.active = false;
+      }
+      initialScrollCorrectionRafRef.current = requestAnimationFrame(() => {
+        initialScrollCorrectionRafRef.current = null;
+        if (
+          prevChannelIdRef.current !== channelIdAtStart ||
+          isManualScrollingRef.current ||
+          initialScrollAppliedChannelRef.current !== channelIdAtStart
+        ) {
+          return;
+        }
+        const scrollEl = scrollRef.current;
+        if (!scrollEl || !isAtBottomRef.current) return;
+        const maxScrollTop = Math.max(
+          0,
+          scrollEl.scrollHeight - scrollEl.clientHeight,
+        );
+        // Only correct a real layout delta.  Assigning the same value is
+        // avoided because WebViews can emit a synthetic scroll event for it.
+        if (Math.abs(scrollEl.scrollTop - maxScrollTop) > 1) {
+          scrollEl.scrollTop = maxScrollTop;
+          lastScrollTopRef.current = maxScrollTop;
         }
       });
       return;
@@ -929,18 +971,9 @@ function ChatPanel({
     }
 
     if (source === "mediaLoad") {
-      if (
-        scrollEl &&
-        (isInitialScrollPendingRef.current ||
-          (initialChannelLoadLockRef.current.active &&
-            initialChannelLoadLockRef.current.chanId === channel.id))
-      ) {
-        scrollEl.scrollTop = Math.max(
-          0,
-          scrollEl.scrollHeight - scrollEl.clientHeight,
-        );
-        lastScrollTopRef.current = scrollEl.scrollTop;
-      }
+      // Media previews use reserved aspect-ratio boxes. Their decode/load
+      // lifecycle must never move the conversation; doing so was the source
+      // of repeated feed jumps while several previews completed together.
       return;
     }
 
@@ -3013,9 +3046,10 @@ function ChatPanel({
     }
 
     if (
-      isInitialScrollPendingRef.current ||
-      (initialChannelLoadLockRef.current.active &&
-        initialChannelLoadLockRef.current.chanId === channel.id)
+      initialScrollAppliedChannelRef.current !== channel.id &&
+      (isInitialScrollPendingRef.current ||
+        (initialChannelLoadLockRef.current.active &&
+          initialChannelLoadLockRef.current.chanId === channel.id))
     ) {
       scrollEl.scrollTop = Math.max(0, scrollEl.scrollHeight - scrollEl.clientHeight);
       lastScrollTopRef.current = scrollEl.scrollTop;
@@ -3665,7 +3699,6 @@ function ChatPanel({
                     key={`prev-img-${idx}`}
                     url={media.url}
                     alt="Link Preview"
-                    onLoad={() => executeScroll("mediaLoad")}
                   />
                 );
               }
@@ -3945,6 +3978,11 @@ function ChatPanel({
     prevIsActiveRef.current = isActive;
 
     if (isChannelChanged || isBecameActive) {
+      if (initialScrollCorrectionRafRef.current !== null) {
+        cancelAnimationFrame(initialScrollCorrectionRafRef.current);
+        initialScrollCorrectionRafRef.current = null;
+      }
+      initialScrollAppliedChannelRef.current = null;
       isInitialScrollPendingRef.current = true;
       initialChannelLoadLockRef.current = {
         chanId: currentChanId,
@@ -4017,9 +4055,18 @@ function ChatPanel({
       initialChannelLoadLockRef.current.active;
     const isPendingScroll =
       isInitialScrollPendingRef.current || isFirstLoadForChannel || isChannelLoadingActive;
+    const needsInitialScroll =
+      initialScrollAppliedChannelRef.current !== currentChanId;
 
-    if (isForegroundSwitch || isChannelChanged || isPendingScroll) {
+    if (
+      needsInitialScroll &&
+      (isForegroundSwitch || isChannelChanged || isPendingScroll)
+    ) {
       if (sortedMessages.length > 0) {
+        // Mark before calling executeScroll so the sibling layout effect and
+        // any synchronous state update cannot schedule another correction for
+        // the same conversation.
+        initialScrollAppliedChannelRef.current = currentChanId;
         lastChannelIdForScrollRef.current = currentChanId;
         lastMessageIdRef.current = lastMsgId;
         hasInitialScrolledChanIdRef.current = currentChanId;
@@ -4074,6 +4121,7 @@ function ChatPanel({
             initialChannelLoadLockRef.current.chanId === currentChanId &&
             initialChannelLoadLockRef.current.active
           ) {
+            initialScrollAppliedChannelRef.current = currentChanId;
             lastChannelIdForScrollRef.current = currentChanId;
             hasInitialScrolledChanIdRef.current = currentChanId;
             if (scrollRef.current) {
@@ -4573,7 +4621,7 @@ function ChatPanel({
       onDragOver={handleDragOver}
       onDragLeave={handleDragLeave}
       onDrop={handleDrop}
-      className={`absolute inset-0 flex flex-col min-w-0 h-full transition-all duration-150 ease-out ${panelBgClass} ${
+      className={`absolute inset-0 flex flex-col min-w-0 h-full ${panelBgClass} ${
         isDragOver ? "ring-2 ring-accent ring-inset bg-accent/10" : ""
       } scale-100 ${
         !isActive ? "hidden pointer-events-none" : "animate-in fade-in duration-150 ease-out"
