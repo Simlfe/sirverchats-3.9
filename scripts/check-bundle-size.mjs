@@ -27,7 +27,10 @@ if (entryFiles.size === 0) {
 
 let totalBytes = 0;
 for (const relative of entryFiles) {
-  const assetPath = resolve(distDir, relative.replaceAll('/', '\\'));
+  // `relative` comes from URL-style HTML attributes. Keep it as a POSIX
+  // relative path and let Node resolve it for the current runner; replacing
+  // separators with `\\` breaks the Linux quality job.
+  const assetPath = resolve(distDir, relative);
   if (!existsSync(assetPath) || !statSync(assetPath).isFile()) {
     console.error(`Bundle budget: referenced asset is missing: ${relative}`);
     process.exit(1);
