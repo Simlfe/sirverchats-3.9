@@ -33,7 +33,6 @@ import {
   SmartYouTubePlayer,
 } from "./MusicPlayer";
 import Avatar from "./Avatar";
-import SmartGifImage from "./SmartGifImage";
 import {
   Send,
   Paperclip,
@@ -109,7 +108,9 @@ import { MessageLinkPreviewCard, parseMessageLink } from "./MessageLinkPreview";
 import ExternalImagePreview, { preloadExternalImage } from "./ExternalImagePreview";
 import UploadedImagePreview, { preloadUploadedImage } from "./UploadedImagePreview";
 import MessageContextMenu from "./MessageContextMenu";
-import AdvancedSearchModal from "./AdvancedSearchModal";
+// Advanced search pulls in the full PocketBase query/filter UI. Keep it out
+// of the normal chat chunk until the user explicitly opens the modal.
+const AdvancedSearchModal = React.lazy(() => import("./AdvancedSearchModal"));
 import {
   AttachmentProcessor,
   ProcessedAttachmentItem,
@@ -129,6 +130,8 @@ import AttachmentDownloadControl from "./AttachmentDownloadControl";
 import { useDownloadManager } from "../services/downloadManager";
 import { MessageDeletionService } from "../services/messageDeletionService";
 import { parseCallLog, formatCallDuration } from "../services/callLogService";
+import { getAttachmentThumbnailUrl } from "../services/attachmentPreview";
+import { compareMessageOrder } from "../services/messagePagination";
 import {
   MessageReactionChips,
   MessageReactionPicker,
@@ -234,6 +237,7 @@ import NotificationsPopover from "./NotificationsPopover";
 import PinnedMessagesPopover from "./PinnedMessagesPopover";
 import MinimizedVoiceBar from "./MinimizedVoiceBar";
 import { toLatinNumerals } from "../lib/utils";
+import { readSessionSnapshot, writeSessionSnapshot } from "../services/sessionSnapshot";
 
 export interface StagedAttachment {
   id: string;
@@ -354,6 +358,8 @@ interface ChatPanelProps {
   key?: string;
   isActive?: boolean;
   isInitialLoading?: boolean;
+  /** Read-only cached mode while the gateway/PocketBase is unavailable. */
+  readOnly?: boolean;
   channel: Channel;
   messages: Message[];
   currentUser: User;
@@ -499,10 +505,14 @@ export function getAttachmentUrl(
   return `${pbService.getServerUrl()}/api/files/${coll}/${recordId}/${fn}`;
 }
 
+// Re-export the shared helper for existing callers and extensions.
+export { getAttachmentThumbnailUrl } from "../services/attachmentPreview";
+
 
 function ChatPanel({
   isActive = true,
   isInitialLoading = false,
+  readOnly = false,
   channel,
   messages,
   currentUser,
@@ -617,7 +627,9 @@ function ChatPanel({
     string | null
   >(null);
   const lastChannelIdRef = useRef<string | null>(null);
-  const [inputText, setInputText] = useState("");
+  const [inputText, setInputText] = useState(() =>
+    conversationCache.get(channel.id)?.inputText || readSessionSnapshot()?.drafts?.[channel.id] || "",
+  );
   const [hasTextSelection, setHasTextSelection] = useState(false);
 
   const checkTextSelection = useCallback(() => {
@@ -678,7 +690,6 @@ function ChatPanel({
     useState(false);
   const [showScrollToBottom, setShowScrollToBottom] = useState(false);
   const [channelSearchQuery, setChannelSearchQuery] = useState("");
-  const [isSwitchingChannel, setIsSwitchingChannel] = useState(false);
   const [isInitialLoadReady, setIsInitialLoadReady] = useState(false);
 
   // Blocked user messages reveal state
@@ -903,17 +914,9 @@ function ChatPanel({
       setIsInitialLoadReady(true);
       requestAnimationFrame(() => {
         applyInitialScroll();
-        requestAnimationFrame(() => {
-          applyInitialScroll();
-          setTimeout(() => {
-            applyInitialScroll();
-            if (
-              initialChannelLoadLockRef.current.chanId === channel.id
-            ) {
-              initialChannelLoadLockRef.current.active = false;
-            }
-          }, 40);
-        });
+        if (initialChannelLoadLockRef.current.chanId === channel.id) {
+          initialChannelLoadLockRef.current.active = false;
+        }
       });
       return;
     }
@@ -953,6 +956,8 @@ function ChatPanel({
   const isPanelAnimatingRef = useRef<boolean>(false);
   const itemHeightsRef = useRef<Map<string, number>>(new Map());
   const virtualRangeRef = useRef({ startIndex: 0, endIndex: 120 });
+  const [virtualRangeVersion, setVirtualRangeVersion] = useState(0);
+  const updateVirtualRangeRef = useRef<() => void>(() => {});
 
   useEffect(() => {
     itemHeightsRef.current.clear();
@@ -965,7 +970,10 @@ function ChatPanel({
       isLoadingMore ||
       isFetchingMoreRef.current ||
       isManualScrollingRef.current ||
-      !hasMoreMessages
+      // The top sentinel sits at the top of an empty feed and would
+      // otherwise race the initial newest-page request. Wait until at least
+      // one cached/remote message is visible before asking for older history.
+      (messages.length === 0 && (isInitialLoading || !isInitialLoadReady))
     )
       return;
     isFetchingMoreRef.current = true;
@@ -1013,9 +1021,26 @@ function ChatPanel({
   }, [
     onLoadMoreMessages,
     isLoadingMore,
-    hasMoreMessages,
     getLiveViewportAnchor,
+    messages.length,
+    isInitialLoading,
+    isInitialLoadReady,
   ]);
+
+  const topSentinelRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const sentinel = topSentinelRef.current;
+    const root = scrollRef.current;
+    if (!sentinel || !root || typeof IntersectionObserver === 'undefined') return;
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((entry) => entry.isIntersecting)) handleLoadMore();
+      },
+      { root, rootMargin: '500px 0px 0px 0px', threshold: 0 },
+    );
+    observer.observe(sentinel);
+    return () => observer.disconnect();
+  }, [handleLoadMore, channel.id]);
 
   const preloadedMediaUrlsRef = useRef<Set<string>>(new Set());
   const preloadMediaForRangeRef = useRef<(startIdx: number, endIdx: number) => void>(() => {});
@@ -1043,7 +1068,7 @@ function ChatPanel({
       const approxRatio = Math.max(0, Math.min(1, scrollTop / (scrollHeight - clientHeight || 1)));
       const approxTotal = scrollHeight / 80;
       const centerIndex = Math.round(approxRatio * approxTotal);
-      preloadMediaForRangeRef.current(centerIndex - 35, centerIndex + 45);
+      preloadMediaForRangeRef.current(centerIndex - 1, centerIndex + 3);
     }
 
     // Synchronously check if user is scrolling upward or moving away from bottom
@@ -1078,6 +1103,11 @@ function ChatPanel({
           prev !== shouldShow ? shouldShow : prev,
         );
       }
+
+      // Re-render only the bounded window around the viewport. Message rows
+      // remain variable-height; measured values are fed back into the spacer
+      // calculation so scrolling and anchored prepends stay stable.
+      updateVirtualRangeRef.current();
 
       // Auto-load older messages in background proactively before reaching the top
       const preloadThreshold = Math.min(500, Math.max(300, scrollRef.current.clientHeight * 0.7));
@@ -1116,6 +1146,7 @@ function ChatPanel({
             channelSearchQuery,
           });
         }
+        scheduleSessionStatePersist();
       }
     });
   };
@@ -1719,7 +1750,7 @@ function ChatPanel({
   );
 
   const loadServerMembersData = React.useCallback(
-    async (forceRefresh = false) => {
+    async () => {
       const sId = targetServerId;
       if (!sId || sId === "dm") {
         setServerMembers([]);
@@ -1741,17 +1772,46 @@ function ChatPanel({
         setAllUsersList((prev) => (prev.length === 0 ? cUsers : prev));
       }
 
-      // Non-blocking parallel background sync with independent progressive updates
+      // Non-blocking parallel background sync with independent progressive updates.
+      // Member/profile reads are deliberately scoped to this server. The old
+      // path downloaded the entire users collection whenever a channel panel
+      // opened, which made server switches wait on an unrelated directory
+      // request over the home connection.
       pbService.fetchServerRoles(sId).then((rList) => {
         if (rList && rList.length > 0) setServerRoles(rList);
       }).catch(() => {});
 
       pbService.fetchServerMembers(sId).then((mList) => {
-        if (mList && mList.length > 0) setServerMembers(mList);
-      }).catch(() => {});
+        if (!mList || mList.length === 0) return;
+        setServerMembers(mList);
 
-      pbService.fetchAllUsers(forceRefresh).then((uList) => {
-        if (uList && uList.length > 0) setAllUsersList(uList);
+        // `fetchServerMembers` expands users on compatible schemas. Fetch
+        // only IDs still missing from that response, never the whole
+        // directory. This keeps mention/profile lookup complete without a
+        // per-user waterfall.
+        const expandedUsers = mList
+          .map((member) => member.expand?.user)
+          .filter(Boolean) as User[];
+        const expandedIds = new Set(expandedUsers.map((user) => user.id));
+        const memberIds = Array.from(new Set(
+          mList
+            .map((member) => member.user || member.expand?.user?.id)
+            .filter((id): id is string => Boolean(id)),
+        ));
+        const cachedIds = new Set(pbService.getCachedUsers().map((user) => user.id));
+        const missingIds = memberIds.filter((id) => !expandedIds.has(id) && !cachedIds.has(id));
+        const profiles: Promise<User[]> = expandedUsers.length > 0 || missingIds.length > 0
+          ? pbService.fetchUsersByIds(missingIds)
+          : Promise.resolve([] as User[]);
+        profiles.then((users: User[]) => {
+          const merged: User[] = [...expandedUsers, ...users];
+          if (merged.length === 0) return;
+          setAllUsersList((previous) => {
+            const byId = new Map<string, User>(previous.map((user) => [user.id, user]));
+            merged.forEach((user) => byId.set(user.id, mergeUserRecord(byId.get(user.id) || user, user)));
+            return Array.from(byId.values());
+          });
+        }).catch(() => {});
       }).catch(() => {});
     },
     [targetServerId],
@@ -1767,11 +1827,11 @@ function ChatPanel({
       if (cRoles.length > 0) setServerRoles(cRoles);
       if (cUsers.length > 0) setAllUsersList(cUsers);
     }
-    loadServerMembersData(false);
+    loadServerMembersData();
 
     const handleServerMemberUpdated = (e: any) => {
       if (!e.detail?.serverId || e.detail?.serverId === targetServerId) {
-        loadServerMembersData(true);
+        loadServerMembersData();
       }
     };
 
@@ -2049,10 +2109,10 @@ function ChatPanel({
     if (unifiedServerMembers.length > 0) {
       setMentionUsers(unifiedServerMembers.map((m) => m.user));
     } else {
-      pbService
-        .fetchAllUsers()
-        .then((list) => setMentionUsers(list))
-        .catch(() => {});
+      // A server with no cached members should not trigger a full directory
+      // download just to populate the mention picker. The picker will show
+      // an empty state until the scoped member query resolves.
+      setMentionUsers([]);
     }
   }, [unifiedServerMembers]);
 
@@ -2100,9 +2160,6 @@ function ChatPanel({
         serverMembersMap.get(sId) ||
         (server?.id ? pbService.getCachedServerMember(server.id, sId) : null);
       if (mem?.expand?.user) return mem.expand.user;
-
-      // Trigger background cache fetch without setting state during render
-      pbService.fetchUserById(sId).catch(() => {});
 
       return null;
     },
@@ -2244,6 +2301,7 @@ function ChatPanel({
   }, [targetMessageId, onClearTargetMessage]);
 
   const scrollRef = useRef<HTMLDivElement>(null);
+  const sessionPersistTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const textInputRef = useRef<HTMLTextAreaElement>(null);
   const touchTimerRef = useRef<any>(null);
@@ -2255,6 +2313,19 @@ function ChatPanel({
     anchorMsgId: string | null;
     anchorOffsetTop: number;
   } | null>(null);
+
+  const scheduleSessionStatePersist = useCallback(() => {
+    if (sessionPersistTimerRef.current) clearTimeout(sessionPersistTimerRef.current);
+    sessionPersistTimerRef.current = setTimeout(() => {
+      const state = conversationDataRef.current;
+      const scrollTop = scrollRef.current?.scrollTop ?? conversationCache.get(channel.id)?.scrollTop ?? 0;
+      writeSessionSnapshot({
+        drafts: { [channel.id]: state.inputText || '' },
+        scrollPositions: { [channel.id]: scrollTop },
+      });
+      sessionPersistTimerRef.current = null;
+    }, 250);
+  }, [channel.id]);
 
   useEffect(() => {
     setCooldownRemaining(0);
@@ -2419,11 +2490,10 @@ function ChatPanel({
       }
     }
 
-    let sorted = Array.from(map.values()).sort((a, b) => {
-      const t1 = new Date(a.created).getTime();
-      const t2 = new Date(b.created).getTime();
-      return t1 - t2;
-    });
+    // Keep rendering order identical to the cursor contract. `created` is not
+    // unique, so the ID tie-breaker prevents equal-timestamp rows from
+    // jumping around between virtualizer passes.
+    let sorted = Array.from(map.values()).sort(compareMessageOrder);
 
     if (channelSearchQuery.trim()) {
       const q = channelSearchQuery.trim().toLowerCase();
@@ -2441,7 +2511,42 @@ function ChatPanel({
 
   const totalMessagesCount = sortedMessages.length;
 
-  // Proactively preload media (images, attachments, and link previews) in advance without blocking the main JS thread
+  // Resolve sender profiles for the currently rendered window in one
+  // coalesced batch. `resolveSenderUser` is called from render/measurement
+  // paths, so doing network work there caused one request per uncached
+  // message and could repeat on every virtualizer pass.
+  useEffect(() => {
+    if (sortedMessages.length === 0) return;
+    const range = virtualRangeRef.current;
+    const visibleMessages = sortedMessages.slice(
+      Math.max(0, range.startIndex),
+      Math.min(sortedMessages.length, range.endIndex + 1),
+    );
+    const ids: string[] = Array.from(new Set<string>(
+      visibleMessages
+        .map((message) => getSenderId(message))
+        .filter((id): id is string => Boolean(id))
+        .filter((id) => !currentUser?.id || id !== currentUser.id)
+        .filter((id) => !pbService.getCachedUser(id) && !allUsersList.some((user) => user.id === id)),
+    ));
+    if (ids.length === 0) return;
+
+    let active = true;
+    pbService.fetchUsersByIds(ids).then((users) => {
+      if (!active || users.length === 0) return;
+      setAllUsersList((previous) => {
+        const byId = new Map<string, User>(previous.map((user) => [user.id, user]));
+        users.forEach((user) => byId.set(user.id, mergeUserRecord(byId.get(user.id) || user, user)));
+        return Array.from(byId.values());
+      });
+    }).catch(() => {});
+
+    return () => { active = false; };
+  }, [sortedMessages, allUsersList, currentUser?.id, virtualRangeVersion]);
+
+  // Proactively preload only nearby thumbnails (never full-resolution files)
+  // and external link previews. This runs during idle time and is capped to a
+  // small window so image-heavy conversations do not flood the connection.
   const preloadMediaForRange = React.useCallback(
     (startIdx: number, endIdx: number) => {
       if (!sortedMessages || sortedMessages.length === 0) return;
@@ -2472,14 +2577,14 @@ function ChatPanel({
                 att.collectionName ||
                 att["@collectionName"] ||
                 (att.isPrivate || isDm ? "private_attachments" : "attachments");
-              const url = getAttachmentUrl({
+              const url = getAttachmentThumbnailUrl({
                 ...att,
                 collectionName: normColl,
                 type: normType,
               });
               if (url && !preloadedMediaUrlsRef.current.has(url)) {
                 preloadedMediaUrlsRef.current.add(url);
-                preloadUploadedImage(url, 960, 720).catch(() => {});
+                preloadUploadedImage(url, 480, 480).catch(() => {});
               }
             }
           }
@@ -2522,8 +2627,8 @@ function ChatPanel({
   // Eagerly prefetch media for recent messages when messages or active channel change
   useEffect(() => {
     if (!sortedMessages || sortedMessages.length === 0) return;
-    const start = Math.max(0, sortedMessages.length - 40);
-    preloadMediaForRange(start, sortedMessages.length);
+    const start = Math.max(0, sortedMessages.length - 4);
+    preloadMediaForRange(start, Math.min(sortedMessages.length, start + 4));
   }, [sortedMessages, channel.id, preloadMediaForRange]);
 
   const blockedClustersMap = React.useMemo(() => {
@@ -2770,6 +2875,63 @@ function ChatPanel({
     [sortedMessages, unreadSeparatorMsgId, calculateAccurateMessageHeight],
   );
 
+  const updateVirtualRange = React.useCallback(() => {
+    const total = sortedMessages.length;
+    const scrollEl = scrollRef.current;
+    if (total === 0 || !scrollEl) return;
+
+    const viewportHeight = Math.max(1, scrollEl.clientHeight);
+    const overscan = Math.max(500, viewportHeight * 1.5);
+    let totalHeight = 0;
+    for (let i = 0; i < total; i++) totalHeight += getEstimatedMessageHeight(i);
+
+    const preferBottom = isAtBottomRef.current || isInitialScrollPendingRef.current;
+    const viewportTop = preferBottom
+      ? Math.max(0, totalHeight - viewportHeight)
+      : Math.max(0, scrollEl.scrollTop);
+    const targetStart = Math.max(0, viewportTop - overscan);
+    const targetEnd = Math.min(totalHeight, viewportTop + viewportHeight + overscan);
+
+    let offset = 0;
+    let start = 0;
+    while (start < total) {
+      const next = getEstimatedMessageHeight(start);
+      if (offset + next >= targetStart) break;
+      offset += next;
+      start++;
+    }
+    let end = start;
+    let visibleOffset = offset;
+    while (end < total && visibleOffset < targetEnd) {
+      visibleOffset += getEstimatedMessageHeight(end);
+      end++;
+    }
+    end = Math.max(start, end - 1);
+
+    let topSpacerHeight = 0;
+    for (let i = 0; i < start; i++) topSpacerHeight += getEstimatedMessageHeight(i);
+    let visibleHeight = 0;
+    for (let i = start; i <= end; i++) visibleHeight += getEstimatedMessageHeight(i);
+    const bottomSpacerHeight = Math.max(0, totalHeight - topSpacerHeight - visibleHeight);
+
+    const current = virtualRangeRef.current;
+    if (
+      current.startIndex !== start ||
+      current.endIndex !== end ||
+      Math.abs((current as any).topSpacerHeight - topSpacerHeight) > 1 ||
+      Math.abs((current as any).bottomSpacerHeight - bottomSpacerHeight) > 1
+    ) {
+      virtualRangeRef.current = { startIndex: start, endIndex: end, topSpacerHeight, bottomSpacerHeight } as any;
+      setVirtualRangeVersion((version) => version + 1);
+    }
+  }, [sortedMessages, getEstimatedMessageHeight]);
+
+  updateVirtualRangeRef.current = updateVirtualRange;
+
+  useLayoutEffect(() => {
+    updateVirtualRange();
+  }, [updateVirtualRange, channel.id, sortedMessages.length]);
+
   React.useEffect(() => {
     for (let i = 0; i < sortedMessages.length; i++) {
       const msg = sortedMessages[i];
@@ -2805,18 +2967,22 @@ function ChatPanel({
 
   const { startIndex, endIndex, topSpacerHeight, bottomSpacerHeight } =
     React.useMemo(() => {
-      return {
-        startIndex: 0,
-        endIndex: Math.max(0, totalMessagesCount - 1),
-        topSpacerHeight: 0,
-        bottomSpacerHeight: 0,
+      const current = virtualRangeRef.current as typeof virtualRangeRef.current & {
+        topSpacerHeight?: number;
+        bottomSpacerHeight?: number;
       };
-    }, [totalMessagesCount]);
+      return {
+        startIndex: Math.min(Math.max(0, current.startIndex), Math.max(0, totalMessagesCount - 1)),
+        endIndex: Math.min(Math.max(0, current.endIndex), Math.max(0, totalMessagesCount - 1)),
+        topSpacerHeight: current.topSpacerHeight || 0,
+        bottomSpacerHeight: current.bottomSpacerHeight || 0,
+      };
+    }, [totalMessagesCount, virtualRangeVersion]);
 
   const visibleSlice = React.useMemo(() => {
     if (totalMessagesCount === 0) return [];
-    return sortedMessages;
-  }, [sortedMessages, totalMessagesCount]);
+    return sortedMessages.slice(startIndex, endIndex + 1);
+  }, [sortedMessages, totalMessagesCount, startIndex, endIndex]);
 
   useLayoutEffect(() => {
     if (!scrollRef.current) return;
@@ -3319,9 +3485,16 @@ function ChatPanel({
                 );
                 if (!target) {
                   try {
-                    const fetched = await pbService.fetchAllUsers(true);
+                    // Resolve a clicked mention with a targeted search. Do
+                    // not download the entire users collection for one
+                    // profile lookup.
+                    const fetched: User[] = await pbService.searchUsers(username);
                     if (fetched && fetched.length > 0) {
-                      setAllUsersList(fetched);
+                      setAllUsersList((previous) => {
+                        const byId = new Map<string, User>(previous.map((user) => [user.id, user]));
+                        fetched.forEach((user) => byId.set(user.id, mergeUserRecord(byId.get(user.id) || user, user)));
+                        return Array.from(byId.values());
+                      });
                       target = fetched.find(
                         (u) =>
                           (u.username || "").toLowerCase() === uLower ||
@@ -3697,6 +3870,18 @@ function ChatPanel({
     channelSearchQuery,
   };
 
+  // Drafts are persisted independently from message/network synchronization so
+  // switching conversations or closing the shell never loses local text.
+  useEffect(() => {
+    scheduleSessionStatePersist();
+    return () => {
+      if (sessionPersistTimerRef.current) {
+        clearTimeout(sessionPersistTimerRef.current);
+        sessionPersistTimerRef.current = null;
+      }
+    };
+  }, [channel.id, inputText, scheduleSessionStatePersist]);
+
   // 1. Save scroll position and conversation state on unmount or channel switch
   useEffect(() => {
     return () => {
@@ -3711,6 +3896,14 @@ function ChatPanel({
           isAtBottom: distFromBottom < 35,
           ...conversationDataRef.current,
         });
+        writeSessionSnapshot({
+          drafts: { [channel.id]: conversationDataRef.current.inputText || '' },
+          scrollPositions: { [channel.id]: scrollEl.scrollTop },
+        });
+      }
+      if (sessionPersistTimerRef.current) {
+        clearTimeout(sessionPersistTimerRef.current);
+        sessionPersistTimerRef.current = null;
       }
     };
   }, [channel.id]);
@@ -3782,7 +3975,6 @@ function ChatPanel({
         }
       }
       prevChannelIdRef.current = currentChanId;
-      setIsSwitchingChannel(false);
     }
 
     if (!isActive) {
@@ -3798,7 +3990,22 @@ function ChatPanel({
 
     const lastMsg = sortedMessages[sortedMessages.length - 1];
     const lastMsgId = lastMsg?.id || null;
-    const saved = conversationCache.get(currentChanId);
+    const persistedSnapshot = readSessionSnapshot();
+    const persistedScrollTop = persistedSnapshot?.scrollPositions?.[currentChanId];
+    const saved = conversationCache.get(currentChanId) ||
+      (typeof persistedScrollTop === 'number'
+        ? {
+            scrollTop: persistedScrollTop,
+            isAtBottom: persistedScrollTop <= 0,
+            inputText: persistedSnapshot?.drafts?.[currentChanId] || '',
+            replyTo: null,
+            attachments: [],
+            processedAttachments: [],
+            editingMessageId: null,
+            editingText: '',
+            channelSearchQuery: '',
+          }
+        : undefined);
 
     // If channel changed or initial mount or messages populated for channel first time: restore state and scroll position synchronously before paint
     const isForegroundSwitch =
@@ -3829,7 +4036,7 @@ function ChatPanel({
           }
 
           if (scrollRef.current) {
-            executeScroll("initial");
+            executeScroll("initial", saved.isAtBottom ? undefined : { targetTop: saved.scrollTop });
           }
         } else {
           if (isChannelChanged) {
@@ -3960,6 +4167,7 @@ function ChatPanel({
 
   const handleSend = (e: React.FormEvent) => {
     e.preventDefault();
+    if (readOnly) return;
     if (!isDmChannel && cooldownRemaining > 0) return;
     if (
       !inputText.trim() &&
@@ -4154,6 +4362,7 @@ function ChatPanel({
   };
 
   const handleAddFiles = (newFiles: File[]) => {
+    if (readOnly) return;
     if (!newFiles || newFiles.length === 0) return;
     const userSettings = getCachedUserSettings();
     const compressionSettings = userSettings.attachmentCompression;
@@ -4204,14 +4413,14 @@ function ChatPanel({
               ? finalItem.compressedFile
               : finalItem.file;
 
-          AttachmentUploadManager.enqueue(initialId, fileToUpload, isDmChannel);
+          AttachmentUploadManager.enqueue(initialId, fileToUpload, isDmChannel, rawFile);
         })
         .catch((err) => {
           console.warn(
             "Attachment processing failed, enqueuing raw file:",
             err,
           );
-          AttachmentUploadManager.enqueue(initialId, rawFile, isDmChannel);
+          AttachmentUploadManager.enqueue(initialId, rawFile, isDmChannel, rawFile);
         });
     }
   };
@@ -4366,7 +4575,7 @@ function ChatPanel({
       onDrop={handleDrop}
       className={`absolute inset-0 flex flex-col min-w-0 h-full transition-all duration-150 ease-out ${panelBgClass} ${
         isDragOver ? "ring-2 ring-accent ring-inset bg-accent/10" : ""
-      } ${isSwitchingChannel ? "opacity-0 scale-[0.995]" : "opacity-100 scale-100"} ${
+      } scale-100 ${
         !isActive ? "hidden pointer-events-none" : "animate-in fade-in duration-150 ease-out"
       }`}
       style={{ display: isActive ? "flex" : "none" }}
@@ -4685,16 +4894,17 @@ function ChatPanel({
             style={{
               overflowAnchor: "auto",
             }}
-            className={`flex-1 overflow-y-auto p-6 flex flex-col gap-0 transition-opacity duration-200 ease-out chat-scroll-container ${
-              isInitialLoadReady
-                ? "opacity-100"
-                : "opacity-0 pointer-events-none"
-            } ${
+            className={`flex-1 overflow-y-auto p-6 flex flex-col gap-0 chat-scroll-container ${
               chatSettings?.showScrollInChats
                 ? "scrollbar-thin"
                 : "scrollbar-none"
             }`}
           >
+            <div
+              ref={topSentinelRef}
+              aria-hidden="true"
+              className="h-px w-full shrink-0 pointer-events-none"
+            />
             {/* Top Indicator */}
             {sortedMessages.length > 0 && (
               <div className="flex justify-center py-2 shrink-0 select-none">
@@ -5772,6 +5982,8 @@ function ChatPanel({
                                                   );
                                                 const downloadUrl =
                                                   getAttachmentUrl(attach);
+                                                  const previewUrl =
+                                                  getAttachmentThumbnailUrl(attach);
                                                 return (
                                                   <div
                                                     key={attach.id}
@@ -5785,7 +5997,8 @@ function ChatPanel({
                                                   >
                                                     {isImage ? (
                                                       <UploadedImagePreview
-                                                        src={downloadUrl}
+                                                        src={previewUrl}
+                                                        useSourceDirect
                                                         alt="Attachment"
                                                         maxPreviewWidth={300}
                                                         maxPreviewHeight={300}
@@ -5841,16 +6054,21 @@ function ChatPanel({
                                                   nonAudioAttachments[3]?.id,
                                                 ),
                                               ) ? (
-                                                <img
-                                                  src={getAttachmentUrl(
-                                                    nonAudioAttachments[3],
-                                                  )}
-                                                  alt="Attachment"
-                                                  loading="eager"
-                                                  decoding="async"
-                                                  className="absolute inset-0 w-full h-full object-cover opacity-25 pointer-events-none select-none"
-                                                  referrerPolicy="no-referrer"
-                                                />
+                                                (() => {
+                                                  const moreThumbnailUrl = getAttachmentThumbnailUrl(nonAudioAttachments[3]);
+                                                  return moreThumbnailUrl ? (
+                                                    <img
+                                                      src={moreThumbnailUrl}
+                                                      alt="Attachment"
+                                                      loading="lazy"
+                                                      decoding="async"
+                                                      className="absolute inset-0 w-full h-full object-cover opacity-25 pointer-events-none select-none"
+                                                      referrerPolicy="no-referrer"
+                                                    />
+                                                  ) : (
+                                                    <Aperture className="w-6 h-6 text-accent opacity-25 pointer-events-none select-none" />
+                                                  );
+                                                })()
                                               ) : (
                                                 <Aperture className="w-6 h-6 text-accent opacity-25 pointer-events-none select-none" />
                                               )}
@@ -5887,6 +6105,8 @@ function ChatPanel({
                                               );
                                               const downloadUrl =
                                                 getAttachmentUrl(attach);
+                                                const previewUrl =
+                                                getAttachmentThumbnailUrl(attach);
                                               return (
                                                 <div
                                                   key={attach.id}
@@ -5900,7 +6120,8 @@ function ChatPanel({
                                                 >
                                                   {isImage ? (
                                                     <UploadedImagePreview
-                                                      src={downloadUrl}
+                                                      src={previewUrl}
+                                                      useSourceDirect
                                                       alt="Attachment"
                                                       maxPreviewWidth={300}
                                                       maxPreviewHeight={300}
@@ -5969,6 +6190,8 @@ function ChatPanel({
                                           );
                                           const downloadUrl =
                                             getAttachmentUrl(attach);
+                                            const previewUrl =
+                                              getAttachmentThumbnailUrl(attach);
                                           const extMatch =
                                             fileNameLower.match(
                                               /\.([a-z0-9]+)$/i,
@@ -6040,7 +6263,8 @@ function ChatPanel({
                                               >
                                                 <div className="relative w-fit max-w-full flex items-center justify-center">
                                                   <UploadedImagePreview
-                                                    src={downloadUrl}
+                                                    src={previewUrl}
+                                                    useSourceDirect
                                                     alt="Attachment"
                                                     width={attach.width}
                                                     height={attach.height}
@@ -6165,6 +6389,7 @@ function ChatPanel({
                                           }
 
                                           if (isVideo) {
+                                            const posterUrl = getAttachmentThumbnailUrl(attach);
                                             const dlItem =
                                               getDownloadByAttachmentId(
                                                 attach.id || downloadUrl,
@@ -6193,6 +6418,7 @@ function ChatPanel({
                                                 <div className="relative w-fit max-w-full flex items-center justify-center">
                                                   <SmartVideoPlayer
                                                     src={downloadUrl}
+                                                    poster={posterUrl || undefined}
                                                     title={attach.file}
                                                     lang={lang}
                                                     isLight={isLight}
@@ -6551,7 +6777,7 @@ function ChatPanel({
           </div>
 
           {/* Subtle loading placeholder while chat is loading and positioning scroll to bottom */}
-          {!isInitialLoadReady && (
+          {!isInitialLoadReady && sortedMessages.length === 0 && (
             <div className="absolute inset-x-0 top-0 bottom-24 flex flex-col items-center justify-center pointer-events-none z-10 animate-in fade-in duration-150">
               <div className="flex items-center gap-2 text-xs font-semibold text-accent/90 bg-[var(--theme-bg-secondary)] px-4 py-2 rounded-full border border-[var(--theme-border)] shadow-xs">
                 <Loader2 className="w-3.5 h-3.5 animate-spin text-accent" />
@@ -7011,6 +7237,7 @@ function ChatPanel({
                                       item.id,
                                       fileToUpload,
                                       isDmChannel,
+                                      item.originalFile,
                                     );
                                   }}
                                   className={`text-[9px] font-extrabold px-2 py-0.5 rounded-lg border cursor-pointer transition-all shrink-0 ${
@@ -7968,7 +8195,7 @@ function ChatPanel({
                         attach.file,
                         attach.type,
                       );
-                      const downloadUrl = getAttachmentUrl(attach);
+                      const thumbnailUrl = getAttachmentThumbnailUrl(attach);
 
                       return (
                         <div
@@ -7983,10 +8210,11 @@ function ChatPanel({
                         >
                           {isImage ? (
                             <UploadedImagePreview
-                              src={downloadUrl}
+                              src={thumbnailUrl}
                               alt={attach.file}
                               maxPreviewWidth={400}
                               maxPreviewHeight={400}
+                              useSourceDirect
                               className="w-full h-full object-cover group-hover/item:scale-105 transition-all"
                             />
                           ) : isVideo ? (
@@ -8108,22 +8336,24 @@ function ChatPanel({
 
       {/* Advanced Search Modal */}
       {showAdvancedSearchModal && (
-        <AdvancedSearchModal
-          server={server || null}
-          currentChannel={channel}
-          serverChannels={serverChannels}
-          serverMembers={serverMembers}
-          currentUser={currentUser}
-          onClose={() => setShowAdvancedSearchModal(false)}
-          onSelectMessage={(chanId, msgId) => {
-            if (chanId === channel.id) {
-              scrollToMessage(msgId);
-            } else if (onNavigateToMessageLink) {
-              onNavigateToMessageLink(server?.id || "dm", chanId, msgId);
-            }
-          }}
-          lang={lang}
-        />
+        <React.Suspense fallback={null}>
+          <AdvancedSearchModal
+            server={server || null}
+            currentChannel={channel}
+            serverChannels={serverChannels}
+            serverMembers={serverMembers}
+            currentUser={currentUser}
+            onClose={() => setShowAdvancedSearchModal(false)}
+            onSelectMessage={(chanId, msgId) => {
+              if (chanId === channel.id) {
+                scrollToMessage(msgId);
+              } else if (onNavigateToMessageLink) {
+                onNavigateToMessageLink(server?.id || "dm", chanId, msgId);
+              }
+            }}
+            lang={lang}
+          />
+        </React.Suspense>
       )}
     </div>
   );

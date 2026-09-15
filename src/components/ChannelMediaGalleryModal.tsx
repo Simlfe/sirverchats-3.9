@@ -19,6 +19,7 @@ import { Channel, Message, User } from '../types';
 import { pbService } from '../pocketbase';
 import AttachmentDownloadControl from './AttachmentDownloadControl';
 import UploadedImagePreview from './UploadedImagePreview';
+import { getAttachmentThumbnailUrl } from '../services/attachmentPreview';
 
 interface ChannelMediaGalleryModalProps {
   isOpen: boolean;
@@ -251,6 +252,7 @@ export default function ChannelMediaGalleryModal({
                   const fileUrl = item.file.startsWith('http') || item.file.startsWith('blob:')
                     ? item.file
                     : pbService.getFileUrl({ id: item.messageId, collectionId: 'messages', collectionName: 'messages' }, item.file);
+                  const thumbnailUrl = getAttachmentThumbnailUrl(item.rawAttachment);
 
                   return (
                     <div
@@ -270,7 +272,8 @@ export default function ChannelMediaGalleryModal({
                       >
                         {isImg ? (
                           <UploadedImagePreview
-                            src={fileUrl}
+                            src={thumbnailUrl}
+                            useSourceDirect
                             alt={item.file}
                             className="w-full h-full object-cover group-hover/card:scale-105 transition-transform duration-300"
                           />

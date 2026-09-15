@@ -1557,6 +1557,9 @@ Adaptive Bitrate Monitor     : Running (monitoring packet loss & network through
 
   private notifyParticipantsChanged() {
     if (this.activeRoom && typeof window !== 'undefined') {
+      // Voice presence is an on-demand service. Initialising it here avoids
+      // idle PocketBase polling while retaining the existing voice UI/events.
+      voicePresenceStore.init();
       const selfP = this.participants.get(this.activeRoom.user.id);
       if (selfP) {
         try {

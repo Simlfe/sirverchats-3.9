@@ -276,12 +276,9 @@ export function preloadExternalImage(url: string): Promise<CacheEntry> {
       isObjectUrl: false,
     });
   }
-  if (typeof Image !== 'undefined') {
-    const img = new Image();
-    img.decoding = 'async';
-    img.referrerPolicy = 'no-referrer';
-    img.src = url;
-  }
+  // `processExternalImage` owns the single fetch/decode pipeline. Starting an
+  // Image.src preload here as well would download the same full-resolution
+  // file twice before the canvas conversion completes.
   return processExternalImage(url);
 }
 

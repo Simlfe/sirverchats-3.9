@@ -5,7 +5,7 @@ import { defineConfig, Plugin } from 'vite';
 import ENDPOINTS from './src/config/endpoints';
 
 function parseAllowedOrigins(): Set<string> {
-  const envVal = process.env.ALLOWED_ORIGINS || process.env.VITE_ALLOWED_ORIGINS || 'http://tauri.localhost,https://sirverdata.top';
+  const envVal = process.env.ALLOWED_ORIGINS || process.env.VITE_ALLOWED_ORIGINS || 'http://tauri.localhost,https://app.sirverdata.top,https://sirverdata.top';
   const list = envVal
     .split(',')
     .map((o) => o.trim())
@@ -14,6 +14,7 @@ function parseAllowedOrigins(): Set<string> {
   const allowedSet = new Set<string>(list);
   // Guarantee base production origins
   allowedSet.add('http://tauri.localhost');
+  allowedSet.add('https://app.sirverdata.top');
   allowedSet.add('https://sirverdata.top');
   allowedSet.add(ENDPOINTS.MAIN_DOMAIN);
   allowedSet.add('https://api.sirverdata.top');
@@ -26,6 +27,13 @@ function checkAllowedOrigin(origin: string | undefined): string | null {
 
   const allowedSet = parseAllowedOrigins();
   if (allowedSet.has(origin)) {
+    return origin;
+  }
+
+  // Permit first-party subdomains without opening the middleware to arbitrary
+  // origins. Keep the scheme strict so an HTTP origin cannot impersonate the
+  // production web app.
+  if (/^https:\/\/([a-z0-9-]+\.)*sirverdata\.top$/i.test(origin)) {
     return origin;
   }
 
@@ -51,16 +59,19 @@ function livekitCorsPlugin(): Plugin {
       return next();
     }
 
-    const origin = req.headers.origin || '*';
-    const matchedOrigin = checkAllowedOrigin(origin) || origin;
+    const origin = req.headers.origin as string | undefined;
+    const matchedOrigin = checkAllowedOrigin(origin);
 
-    res.setHeader('Access-Control-Allow-Origin', matchedOrigin);
-    res.setHeader('Vary', 'Origin');
-    res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+    if (matchedOrigin) {
+      res.setHeader('Access-Control-Allow-Origin', matchedOrigin);
+      res.setHeader('Vary', 'Origin');
+      res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
+      res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+      res.setHeader('Access-Control-Max-Age', '600');
+    }
 
     if (req.method === 'OPTIONS') {
-      res.statusCode = 204;
+      res.statusCode = matchedOrigin ? 204 : 403;
       res.end();
       return;
     }

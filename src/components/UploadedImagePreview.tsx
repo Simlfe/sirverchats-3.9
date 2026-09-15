@@ -10,6 +10,9 @@ export interface UploadedImagePreviewProps extends React.ImgHTMLAttributes<HTMLI
   aspectRatio?: string;
   maxPreviewWidth?: number;
   maxPreviewHeight?: number;
+  /** Feed thumbnails are already sized/encoded; never fetch or canvas-process
+   * the original when this flag is set. */
+  useSourceDirect?: boolean;
   onLoad?: (e?: any) => void;
   onError?: (e?: any) => void;
   onClick?: (e: React.MouseEvent<HTMLImageElement>) => void;
@@ -285,14 +288,29 @@ export function preloadUploadedImage(
       isObjectUrl: false,
     });
   }
-  // Prime browser network/image cache
-  if (typeof Image !== 'undefined') {
+  // Prime only the URL supplied by the caller. Previous code loaded this URL
+  // with Image and then fetched it again to canvas-process it, doubling feed
+  // traffic and often pulling the full-resolution original.
+  if (typeof Image === 'undefined') {
+    return Promise.resolve({ previewUrl: url, originalUrl: url, width: maxWidth, height: maxHeight, created: Date.now(), isObjectUrl: false });
+  }
+  return new Promise((resolve) => {
     const img = new Image();
     img.decoding = 'async';
+    img.loading = 'lazy';
     img.referrerPolicy = 'no-referrer';
+    const finish = () => resolve({
+      previewUrl: url,
+      originalUrl: url,
+      width: img.naturalWidth || maxWidth,
+      height: img.naturalHeight || maxHeight,
+      created: Date.now(),
+      isObjectUrl: false,
+    });
+    img.onload = finish;
+    img.onerror = finish;
     img.src = url;
-  }
-  return processUploadedImagePreview(url, maxWidth, maxHeight);
+  });
 }
 
 function UploadedImagePreviewComponent({
@@ -303,6 +321,7 @@ function UploadedImagePreviewComponent({
   aspectRatio,
   maxPreviewWidth = 960,
   maxPreviewHeight = 720,
+  useSourceDirect = false,
   onLoad,
   onError,
   onClick,
@@ -310,9 +329,28 @@ function UploadedImagePreviewComponent({
   style,
   ...rest
 }: UploadedImagePreviewProps) {
+  // A missing remote thumbnail is intentional (the original must not be
+  // fetched just to paint the feed). Render a stable placeholder instead of
+  // letting an empty src trigger a browser document request or broken-image
+  // icon. The media viewer still receives the original URL separately.
+  if (!src) {
+    return (
+      <div
+        role="img"
+        aria-label={alt}
+        className={`${className} relative flex items-center justify-center rounded-2xl bg-slate-900/60 text-slate-400 ${className.includes('object-cover') ? 'w-full h-full' : 'min-w-[120px] min-h-[90px]'}`}
+        style={{ aspectRatio: aspectRatio || '16 / 9', ...style }}
+        onClick={onClick as any}
+        {...(rest as any)}
+      >
+        <span className="text-[10px] font-semibold">Preview unavailable</span>
+      </div>
+    );
+  }
+
   const isGif = Boolean(src && (/\.gif($|\?)/i.test(src) || /format=gif/i.test(src) || src.toLowerCase().includes('.gif')));
 
-  if (isGif) {
+  if (isGif && !useSourceDirect) {
     const GIF_MAX_PREVIEW_EDGE = 640;
     const effectiveMaxW = Math.min(maxPreviewWidth, GIF_MAX_PREVIEW_EDGE);
     const effectiveMaxH = Math.min(maxPreviewHeight, GIF_MAX_PREVIEW_EDGE);
@@ -337,14 +375,31 @@ function UploadedImagePreviewComponent({
   const containerRef = useRef<HTMLDivElement>(null);
   const imgRef = useRef<HTMLImageElement>(null);
   const [cachedEntry, setCachedEntry] = useState<CacheEntry | undefined>(() => uploadedPreviewCache.get(cacheKey));
-  const [previewSrc, setPreviewSrc] = useState<string>(() => cachedEntry ? cachedEntry.previewUrl : '');
-  const [loading, setLoading] = useState<boolean>(!cachedEntry);
+  const [previewSrc, setPreviewSrc] = useState<string>(() => useSourceDirect ? src : (cachedEntry ? cachedEntry.previewUrl : ''));
+  const [loading, setLoading] = useState<boolean>(() => useSourceDirect ? false : !cachedEntry);
   const [imageLoaded, setImageLoaded] = useState<boolean>(Boolean(cachedEntry));
   const isMountedRef = useRef(true);
 
   // Eagerly process and pre-decode preview images in advance
   useEffect(() => {
     isMountedRef.current = true;
+    if (useSourceDirect) {
+      const directEntry: CacheEntry = {
+        previewUrl: src,
+        originalUrl: src,
+        width: Number(width) || maxPreviewWidth,
+        height: Number(height) || maxPreviewHeight,
+        created: Date.now(),
+        isObjectUrl: false,
+      };
+      attachmentDimensionsCache.set(src, { width: directEntry.width, height: directEntry.height });
+      setCachedEntry(directEntry);
+      setPreviewSrc(src);
+      setLoading(false);
+      return () => {
+        isMountedRef.current = false;
+      };
+    }
     const key = `${src}_w${maxPreviewWidth}_h${maxPreviewHeight}`;
     const cached = uploadedPreviewCache.get(key);
 
@@ -373,7 +428,7 @@ function UploadedImagePreviewComponent({
     return () => {
       isMountedRef.current = false;
     };
-  }, [src, maxPreviewWidth, maxPreviewHeight]);
+  }, [src, maxPreviewWidth, maxPreviewHeight, useSourceDirect, width, height]);
 
   const cachedDim = attachmentDimensionsCache.get(src);
   const effectiveW = width || cachedDim?.width;
@@ -413,7 +468,8 @@ function UploadedImagePreviewComponent({
         ref={imgRef}
         src={previewSrc || src}
         alt={alt}
-        loading="eager"
+        {...rest}
+        loading="lazy"
         decoding="async"
         className={`${className} relative z-10 w-full h-full object-cover block transition-opacity duration-150 ease-out ${imageLoaded ? 'opacity-100' : 'opacity-0'}`}
         style={style}
@@ -429,7 +485,6 @@ function UploadedImagePreviewComponent({
           onError?.(e);
         }}
         referrerPolicy="no-referrer"
-        {...rest}
       />
     </div>
   );

@@ -25,11 +25,13 @@ class VoicePresenceStore {
   private listeners: Set<() => void> = new Set();
   private localParticipant: VoiceParticipantInfo | null = null;
   private bc: BroadcastChannel | null = null;
-  private pruneTimer: any = null;
+  private pruneTimer: ReturnType<typeof setInterval> | null = null;
   private isInitialized = false;
 
   constructor() {
-    this.init();
+    // Presence is ephemeral and must not start polling/PocketBase reads while
+    // the user is only browsing text channels. `RealtimeMediaProvider` calls
+    // init() when the first voice session is actually opened.
   }
 
   public init() {
@@ -38,50 +40,8 @@ class VoicePresenceStore {
 
     this.initWebSocketListener();
     this.initBroadcastChannel();
-    this.initPocketBaseSubscription();
     this.initUnloadListeners();
     this.startHeartbeatAndPruning();
-    this.fetchInitialPresences();
-  }
-
-  private async fetchInitialPresences() {
-    try {
-      const records = await pbService.fetchVoicePresences();
-      if (Array.isArray(records)) {
-        const currentAuthUser = pbService.getCurrentUser();
-        records.forEach((r) => {
-          if (r.channelId && r.userId) {
-            // Strict Check for Local User
-            if (currentAuthUser && r.userId === currentAuthUser.id) {
-              if (!this.localParticipant || r.channelId !== this.localParticipant.channelId) {
-                // Ignore and delete stale record from PocketBase
-                pbService.deleteVoicePresence(r.userId).catch(() => {});
-                return;
-              }
-            }
-
-            // Strict Check for Remote User: If user is already active in another channel with a newer or current state, ignore
-            const activeState = this.userChannelStateMap.get(r.userId);
-            if (activeState && activeState.currentChannelId !== r.channelId) {
-              return;
-            }
-
-            this.handlePresenceEvent({
-              status: 'joined',
-              ...r
-            });
-          }
-        });
-      }
-    } catch (e) {}
-  }
-
-  private initPocketBaseSubscription() {
-    try {
-      pbService.subscribeToVoicePresences((evt) => {
-        this.handlePresenceEvent(evt);
-      });
-    } catch (e) {}
   }
 
   private initUnloadListeners() {
@@ -98,7 +58,6 @@ class VoicePresenceStore {
         };
         wsService.send(msg as any);
         try { this.bc?.postMessage(msg); } catch (e) {}
-        pbService.deleteVoicePresence(prev.userId).catch(() => {});
       }
     };
 
@@ -124,13 +83,12 @@ class VoicePresenceStore {
 
   private startHeartbeatAndPruning() {
     if (typeof window === 'undefined') return;
+    if (this.pruneTimer) return;
 
-    let tick = 0;
     // Prune stale participants (> 30s without heartbeat) & broadcast local presence (every 3s)
     const PRESENCE_GRACE_PERIOD_MS = 30000;
 
     this.pruneTimer = setInterval(() => {
-      tick++;
       const now = Date.now();
       let changed = false;
 
@@ -153,15 +111,18 @@ class VoicePresenceStore {
         this.notify();
       }
 
-      // Periodically refresh initial presences as fallback (every 6s)
-      if (tick % 2 === 0) {
-        this.fetchInitialPresences();
-      }
-
       // Heartbeat for local participant if connected
       if (this.localParticipant) {
         this.localParticipant.lastHeartbeat = Date.now();
         this.broadcastSelfPresence(this.localParticipant);
+      }
+
+      // Keep no timer alive after a call has ended and all remote presence
+      // entries have been pruned. The WebSocket listener remains available for
+      // the next call and is restarted by setLocalPresence/handlePresenceEvent.
+      if (!this.localParticipant && this.store.size === 0 && this.pruneTimer) {
+        clearInterval(this.pruneTimer);
+        this.pruneTimer = null;
       }
     }, 3000);
   }
@@ -198,6 +159,7 @@ class VoicePresenceStore {
     } = evt;
 
     if (!channelId || !userId) return;
+    this.startHeartbeatAndPruning();
 
     const currentAuthUser = pbService.getCurrentUser();
     const isLocalUser = currentAuthUser && userId === currentAuthUser.id;
@@ -337,7 +299,6 @@ class VoicePresenceStore {
         };
         wsService.send(msg as any);
         try { this.bc?.postMessage(msg); } catch (e) {}
-        pbService.deleteVoicePresence(prev.userId).catch(() => {});
 
         // Synchronously remove local user from all channels in store
         this.store.forEach((channelMap, cId) => {
@@ -347,9 +308,15 @@ class VoicePresenceStore {
           }
         });
         this.notify();
+        if (!this.localParticipant && this.store.size === 0 && this.pruneTimer) {
+          clearInterval(this.pruneTimer);
+          this.pruneTimer = null;
+        }
       }
       return;
     }
+
+    this.startHeartbeatAndPruning();
 
     // If local user switched channels, broadcast 'left' for previous channel and clean store
     if (this.localParticipant && this.localParticipant.channelId !== info.channelId) {
@@ -363,7 +330,6 @@ class VoicePresenceStore {
       };
       wsService.send(msg as any);
       try { this.bc?.postMessage(msg); } catch (e) {}
-      pbService.deleteVoicePresence(prev.userId).catch(() => {});
 
       this.store.forEach((channelMap, cId) => {
         if (cId !== info.channelId && channelMap.has(prev.userId)) {
@@ -408,7 +374,6 @@ class VoicePresenceStore {
     };
     wsService.send(msg as any);
     try { this.bc?.postMessage(msg); } catch (e) {}
-    pbService.syncVoicePresence(info).catch(() => {});
   }
 
   public queryAllPresence(serverId?: string) {
@@ -418,7 +383,6 @@ class VoicePresenceStore {
     };
     wsService.send(msg as any);
     try { this.bc?.postMessage(msg); } catch (e) {}
-    this.fetchInitialPresences();
   }
 
   public getLocalPresence(): VoiceParticipantInfo | null {

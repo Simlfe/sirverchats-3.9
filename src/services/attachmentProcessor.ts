@@ -1,7 +1,22 @@
 import { AttachmentCompressionSettings, DEFAULT_ATTACHMENT_SETTINGS, getCachedUserSettings } from '../lib/userSettings';
 import { Attachment } from '../types';
 import { extractAudioMetadata } from '../lib/audioMetadata';
-import { optimizeGif } from '../lib/gifOptimizer';
+import { calculateThumbnailDimensions } from './thumbnailDimensions';
+import {
+  AUDIO_EXTS,
+  IMAGE_EXTS,
+  VIDEO_EXTS,
+  UNRENDERABLE_IMAGE_EXTS,
+  inferMimeType,
+} from './attachmentMime';
+export {
+  AUDIO_EXTS,
+  IMAGE_EXTS,
+  VIDEO_EXTS,
+  UNRENDERABLE_IMAGE_EXTS,
+  inferMimeType,
+} from './attachmentMime';
+export { calculateThumbnailDimensions } from './thumbnailDimensions';
 
 export interface ProcessedAttachmentItem {
   id: string;
@@ -33,48 +48,16 @@ export interface ProcessedAttachmentItem {
   originalFilename?: string;
 }
 
-export function generateAttachmentId(): string {
-  return 'att_' + Math.random().toString(36).substring(2, 11) + '_' + Date.now();
+export interface GeneratedThumbnailFile {
+  file: File;
+  width: number;
+  height: number;
+  mime: string;
+  size: number;
 }
 
-export const IMAGE_EXTS = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.svg', '.bmp', '.ico', '.heic', '.avif'];
-export const VIDEO_EXTS = ['.mp4', '.webm', '.ogg', '.mov', '.m4v', '.mkv', '.avi', '.wmv', '.flv'];
-export const AUDIO_EXTS = ['.mp3', '.wav', '.ogg', '.flac', '.m4a', '.aac', '.opus', '.wma'];
-export const UNRENDERABLE_IMAGE_EXTS = ['.exr', '.hdr', '.psd', '.psb', '.tga', '.dds', '.cr2', '.nef', '.arw', '.dng', '.raf', '.orf', '.eps', '.ai', '.tiff', '.tif'];
-
-export function inferMimeType(filename: string, existingType?: string): string {
-  if (existingType && existingType !== 'application/octet-stream' && existingType !== 'binary/octet-stream') {
-    return existingType;
-  }
-  const lower = (filename || '').toLowerCase();
-  if (IMAGE_EXTS.some((ext) => lower.endsWith(ext))) {
-    const ext = lower.split('.').pop();
-    if (ext === 'svg') return 'image/svg+xml';
-    if (ext === 'jpg' || ext === 'jpeg') return 'image/jpeg';
-    if (ext === 'png') return 'image/png';
-    if (ext === 'gif') return 'image/gif';
-    if (ext === 'webp') return 'image/webp';
-    return `image/${ext || 'png'}`;
-  }
-  if (VIDEO_EXTS.some((ext) => lower.endsWith(ext))) {
-    const ext = lower.split('.').pop();
-    if (ext === 'mp4' || ext === 'm4v') return 'video/mp4';
-    if (ext === 'webm') return 'video/webm';
-    if (ext === 'mov') return 'video/quicktime';
-    return `video/${ext || 'mp4'}`;
-  }
-  if (AUDIO_EXTS.some((ext) => lower.endsWith(ext))) {
-    const ext = lower.split('.').pop();
-    if (ext === 'mp3') return 'audio/mpeg';
-    if (ext === 'wav') return 'audio/wav';
-    if (ext === 'ogg' || ext === 'opus') return 'audio/ogg';
-    if (ext === 'm4a' || ext === 'aac') return 'audio/mp4';
-    return `audio/${ext || 'mpeg'}`;
-  }
-  if (UNRENDERABLE_IMAGE_EXTS.some((ext) => lower.endsWith(ext))) {
-    return 'image/x-unrenderable';
-  }
-  return existingType || 'application/octet-stream';
+export function generateAttachmentId(): string {
+  return 'att_' + Math.random().toString(36).substring(2, 11) + '_' + Date.now();
 }
 
 export function isAttachmentUnrenderable(filename?: string, mimeType?: string, isFailed?: boolean): boolean {
@@ -324,6 +307,9 @@ class AttachmentProcessorService {
       updateItem({ progress: 20, statusMessage: 'Optimizing animated GIF...' });
       const thumbnail = await this.generateImageThumbnail(file).catch(() => undefined);
       updateItem({ thumbnailUrl: thumbnail, progress: 35, statusMessage: 'Compressing GIF frames...' });
+      // GIF optimization is a large optional dependency. Load it only after
+      // the user actually selects an animated GIF for processing.
+      const { optimizeGif } = await import('../lib/gifOptimizer');
 
       const maxRes = settings.images.maxResolution || 960;
       const optimizedFile = await optimizeGif(
@@ -1036,6 +1022,139 @@ class AttachmentProcessorService {
   }
 
   /**
+   * Create the small, separately-uploaded feed thumbnail. The source file is
+   * never mutated. createImageBitmap is preferred because browsers can apply
+   * EXIF orientation during decode; the HTMLImageElement path is retained for
+   * older WebViews. WebP preserves alpha, with PNG/JPEG fallbacks where WebP
+   * encoding is unavailable.
+   */
+  async generateImageThumbnailFile(file: File, maxDim: number = 480): Promise<GeneratedThumbnailFile> {
+    if (typeof document === 'undefined' && typeof OffscreenCanvas === 'undefined') {
+      throw new Error('Image thumbnail generation requires a browser');
+    }
+
+    let source: ImageBitmap | HTMLImageElement | null = null;
+    let objectUrl: string | null = null;
+    try {
+      if (typeof createImageBitmap === 'function') {
+        try {
+          source = await createImageBitmap(file, { imageOrientation: 'from-image' } as any);
+        } catch {
+          source = await createImageBitmap(file);
+        }
+      }
+      if (!source && typeof document !== 'undefined') {
+        objectUrl = URL.createObjectURL(file);
+        const img = new Image();
+        img.decoding = 'async';
+        img.src = objectUrl;
+        try {
+          await img.decode();
+        } catch {
+          await new Promise<void>((resolve, reject) => {
+            img.onload = () => resolve();
+            img.onerror = () => reject(new Error('Unable to decode image'));
+          });
+        }
+        source = img;
+      }
+      if (!source) throw new Error('Unable to decode image');
+
+      const sourceWidth = (source as ImageBitmap).width || (source as HTMLImageElement).naturalWidth;
+      const sourceHeight = (source as ImageBitmap).height || (source as HTMLImageElement).naturalHeight;
+      if (!sourceWidth || !sourceHeight) throw new Error('Image has no dimensions');
+      const { width, height } = calculateThumbnailDimensions(sourceWidth, sourceHeight, maxDim);
+      // PNG/WebP/GIF/AVIF sources may carry alpha. If WebP encoding is not
+      // available, prefer PNG for those formats instead of silently flattening
+      // transparency into a JPEG thumbnail.
+      const sourcePreservesTransparency = /(?:png|webp|gif|avif)/i.test(file.type || file.name);
+
+      let blob: Blob | null = null;
+      if (typeof OffscreenCanvas !== 'undefined') {
+        const canvas = new OffscreenCanvas(width, height);
+        const ctx = canvas.getContext('2d');
+        if (ctx) {
+          ctx.imageSmoothingEnabled = true;
+          ctx.imageSmoothingQuality = 'high';
+          ctx.drawImage(source as any, 0, 0, width, height);
+          blob = await canvas.convertToBlob({ type: 'image/webp', quality: 0.76 });
+          if (!blob || !blob.type.includes('webp')) {
+            blob = sourcePreservesTransparency
+              ? await canvas.convertToBlob({ type: 'image/png' })
+              : await canvas.convertToBlob({ type: 'image/jpeg', quality: 0.76 });
+            if (!blob || (!sourcePreservesTransparency && !blob.type.includes('jpeg'))) {
+              blob = await canvas.convertToBlob({ type: 'image/png' });
+            }
+          }
+        }
+      } else if (typeof document !== 'undefined') {
+        const canvas = document.createElement('canvas');
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext('2d');
+        if (ctx) {
+          ctx.imageSmoothingEnabled = true;
+          ctx.imageSmoothingQuality = 'high';
+          ctx.drawImage(source as any, 0, 0, width, height);
+          blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, 'image/webp', 0.76));
+          if (!blob || !blob.type.includes('webp')) {
+            blob = sourcePreservesTransparency
+              ? await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, 'image/png'))
+              : await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, 'image/jpeg', 0.76));
+            if (!blob || (!sourcePreservesTransparency && !blob.type.includes('jpeg'))) {
+              blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, 'image/png'));
+            }
+          }
+          canvas.width = 0;
+          canvas.height = 0;
+        }
+      }
+      if (!blob) throw new Error('Unable to encode image thumbnail');
+      const initialMime = blob.type || 'image/webp';
+
+      // Keep the feed payload bounded. Very detailed screenshots can still
+      // exceed the target at 480px, so retry WebP/JPEG with progressively
+      // lower quality before accepting the first encoded blob. Transparency
+      // is retained by keeping PNG as the final fallback.
+      if (blob.size > 200 * 1024 && !initialMime.includes('png')) {
+        const qualities = [0.68, 0.58, 0.48];
+        for (const quality of qualities) {
+          let candidate: Blob | null = null;
+          if (typeof OffscreenCanvas !== 'undefined') {
+            const canvas = new OffscreenCanvas(width, height);
+            const ctx = canvas.getContext('2d');
+            if (ctx) {
+              ctx.drawImage(source as any, 0, 0, width, height);
+              candidate = await canvas.convertToBlob({ type: 'image/webp', quality });
+            }
+          } else if (typeof document !== 'undefined') {
+            const canvas = document.createElement('canvas');
+            canvas.width = width;
+            canvas.height = height;
+            const ctx = canvas.getContext('2d');
+            if (ctx) {
+              ctx.drawImage(source as any, 0, 0, width, height);
+              candidate = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, 'image/webp', quality));
+            }
+          }
+          if (candidate && candidate.size < blob.size) blob = candidate;
+          if (blob.size <= 200 * 1024) break;
+        }
+      }
+      const mime = blob.type || 'image/webp';
+      const extension = mime.includes('png') ? 'png' : mime.includes('jpeg') ? 'jpg' : 'webp';
+      const baseName = file.name.replace(/\.[^/.]+$/, '') || 'thumbnail';
+      const thumbFile = new File([blob], `${baseName}.thumb.${extension}`, { type: mime, lastModified: Date.now() });
+      return { file: thumbFile, width, height, mime, size: thumbFile.size };
+    } finally {
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+      if (source && typeof (source as ImageBitmap).close === 'function') {
+        try { (source as ImageBitmap).close(); } catch {}
+      }
+    }
+  }
+
+  /**
    * Generate video thumbnail preview from video frame.
    */
   async generateVideoThumbnail(file: File, maxDim: number = 240): Promise<string> {
@@ -1085,6 +1204,66 @@ class AttachmentProcessorService {
         reject(new Error('Failed to load video for thumbnail'));
       };
 
+      video.src = objectUrl;
+    });
+  }
+
+  /** Generate a separately-uploadable JPEG poster without reading a remote
+   * video. Only the local file selected by the user is decoded. */
+  async generateVideoThumbnailFile(file: File, maxDim: number = 480): Promise<GeneratedThumbnailFile> {
+    if (typeof document === 'undefined') throw new Error('Video thumbnail generation requires a browser');
+    return new Promise((resolve, reject) => {
+      const video = document.createElement('video');
+      const objectUrl = URL.createObjectURL(file);
+      let settled = false;
+      const finish = (error?: Error, value?: GeneratedThumbnailFile) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeout);
+        URL.revokeObjectURL(objectUrl);
+        video.removeAttribute('src');
+        try { video.load(); } catch {}
+        if (error) reject(error);
+        else if (value) resolve(value);
+      };
+      const timeout = setTimeout(() => finish(new Error('Video poster generation timed out')), 5000);
+
+      video.muted = true;
+      video.playsInline = true;
+      video.preload = 'metadata';
+      video.onloadedmetadata = () => {
+        const targetTime = Number.isFinite(video.duration) ? Math.min(0.2, Math.max(0, video.duration / 4)) : 0;
+        try { video.currentTime = targetTime; } catch { video.onseeked?.(new Event('seeked')); }
+      };
+      video.onloadeddata = () => {
+        if (video.currentTime === 0) {
+          try { video.currentTime = Math.min(0.2, Math.max(0, video.duration / 4)); } catch {}
+        }
+      };
+      video.onseeked = () => {
+        const sourceWidth = video.videoWidth || 640;
+        const sourceHeight = video.videoHeight || 360;
+        const { width, height } = calculateThumbnailDimensions(sourceWidth, sourceHeight, maxDim);
+        const canvas = document.createElement('canvas');
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) {
+          finish(new Error('Canvas context unavailable'));
+          return;
+        }
+        ctx.drawImage(video, 0, 0, width, height);
+        canvas.toBlob((blob) => {
+          if (!blob) {
+            finish(new Error('Unable to encode video poster'));
+            return;
+          }
+          const baseName = file.name.replace(/\.[^/.]+$/, '') || 'video';
+          const poster = new File([blob], `${baseName}.poster.jpg`, { type: 'image/jpeg', lastModified: Date.now() });
+          finish(undefined, { file: poster, width, height, mime: 'image/jpeg', size: poster.size });
+        }, 'image/jpeg', 0.76);
+      };
+      video.onerror = () => finish(new Error('Failed to decode video poster'));
       video.src = objectUrl;
     });
   }

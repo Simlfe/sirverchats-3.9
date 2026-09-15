@@ -151,6 +151,21 @@ export interface Message {
   is_pending?: boolean; // For local echo
 }
 
+/** Stable cursor used by both server channels and direct-message history. */
+export interface MessageCursor {
+  created: string;
+  id: string;
+}
+
+/** A page of messages returned in chronological order for rendering. */
+export interface MessagePage<T = Message> {
+  items: T[];
+  nextCursor: MessageCursor | null;
+  hasMore: boolean;
+}
+
+export type ConversationKind = 'channel' | 'dm';
+
 export interface DownloadedFileRecord {
   user_id: string;
   original_filename: string;
@@ -166,6 +181,12 @@ export interface DownloadedFileRecord {
 export interface Attachment {
   id: string;
   file: string;
+  /** Optional feed-sized image/video poster kept separate from the original. */
+  thumbnail?: string;
+  thumbnail_width?: number;
+  thumbnail_height?: number;
+  thumbnail_mime?: string;
+  thumbnail_size?: number;
   title?: string;
   artist?: string;
   coverUrl?: string;

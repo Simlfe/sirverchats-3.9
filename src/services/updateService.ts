@@ -3,6 +3,7 @@ import { AppUpdateRecord } from '../types';
 import { getCachedUserSettings } from '../lib/userSettings';
 import { isTauriEnvironment, isMobilePlatform } from '../lib/tauriDesktopService';
 import { downloadManager, DownloadItem, getBlobFromDB } from './downloadManager';
+import { afterFirstPaint } from './afterPaint';
 
 export const CURRENT_APP_VERSION = '1.0';
 
@@ -216,12 +217,15 @@ class UpdateServiceClass {
     // Auto checks are a desktop-Tauri concern. Mobile/Web updates are
     // delivered by the store/site and must not trigger background downloads.
     if (canUseNativeSelfUpdater()) {
-      setTimeout(() => {
+      // Keep the first paint and first interaction free of updater work. The
+      // check is still automatic on desktop, but it never downloads or
+      // installs anything without an explicit action in Settings.
+      afterFirstPaint(() => {
         const cfg = getCachedUserSettings();
         if (cfg.updates?.autoCheck ?? true) {
           this.checkForUpdates(false).catch(() => {});
         }
-      }, 1200);
+      });
     }
   }
 
@@ -567,7 +571,7 @@ class UpdateServiceClass {
             });
 
             // Automatically download and install in-place if autoDownload is enabled
-            if (settings.updates?.autoDownload ?? true) {
+            if (manualTrigger && (settings.updates?.autoDownload ?? true)) {
               this.startDownload();
             }
 
@@ -628,6 +632,7 @@ class UpdateServiceClass {
 
           if (
             initialStatus === 'available' &&
+            manualTrigger &&
             (settings.updates?.autoDownload ?? true) &&
             newestRecord.download_url
           ) {
@@ -662,7 +667,7 @@ class UpdateServiceClass {
           dismissedNotification: false,
         });
 
-        if (settings.updates?.autoDownload ?? true) {
+        if (manualTrigger && (settings.updates?.autoDownload ?? true)) {
           this.startDownload();
         }
 

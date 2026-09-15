@@ -10,6 +10,7 @@ import {
   getThemeImageOverrides,
 } from '../theme/adminThemeService';
 import { pbService } from '../pocketbase';
+import { afterFirstPaint } from '../services/afterPaint';
 import {
   getCachedUserSettings,
   saveCachedUserSettings,
@@ -244,28 +245,33 @@ export const ThemeProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
   // On Mount: Initial Load & PocketBase Realtime Subscription
   useEffect(() => {
-    refreshThemes();
+    let unsub: (() => void) | null = null;
+    const cancel = afterFirstPaint(() => {
+      // The cached/built-in theme is already available synchronously. Defer
+      // the remote refresh and realtime subscription until after the shell has
+      // painted so a slow PocketBase connection cannot delay first content.
+      void refreshThemes();
+      unsub = pbService.subscribeAdminAppSettings((data: any) => {
+        if (data && Array.isArray(data.themes) && data.themes.length > 0) {
+          const payloadHash = JSON.stringify(data.themes);
+          if (lastAdminSettingsVersionRef.current === payloadHash) return; // Skip identical updates!
+          lastAdminSettingsVersionRef.current = payloadHash;
 
-    const unsub = pbService.subscribeAdminAppSettings((data: any) => {
-      if (data && Array.isArray(data.themes) && data.themes.length > 0) {
-        const payloadHash = JSON.stringify(data.themes);
-        if (lastAdminSettingsVersionRef.current === payloadHash) return; // Skip identical updates!
-        lastAdminSettingsVersionRef.current = payloadHash;
+          const pubIds: string[] = data.publishedThemeIds || (data.publishedThemeId ? [data.publishedThemeId] : []);
+          const updatedList: ThemeDefinition[] = data.themes.map((t: ThemeDefinition) => ({
+            ...t,
+            isPublished: t.isPublished || pubIds.includes(t.id),
+          }));
 
-        const pubIds: string[] = data.publishedThemeIds || (data.publishedThemeId ? [data.publishedThemeId] : []);
-        const updatedList: ThemeDefinition[] = data.themes.map((t: ThemeDefinition) => ({
-          ...t,
-          isPublished: t.isPublished || pubIds.includes(t.id),
-        }));
-
-        const merged = mergeWithBuiltinThemes(updatedList);
-        setAllThemes(merged);
-        saveCachedAllThemes(merged);
-      }
+          const merged = mergeWithBuiltinThemes(updatedList);
+          setAllThemes(merged);
+          saveCachedAllThemes(merged);
+        }
+      });
     });
-
     return () => {
-      if (typeof unsub === 'function') unsub();
+      cancel();
+      unsub?.();
     };
   }, [refreshThemes]);
 

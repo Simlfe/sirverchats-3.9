@@ -110,9 +110,9 @@ function TitleBar({
 
         <div className="h-3 w-[1px] bg-slate-500/30 mx-1 hidden sm:block" />
 
-        <div className="hidden sm:flex items-center gap-1 text-[10px] font-mono text-emerald-400 bg-emerald-500/10 border border-emerald-500/20 px-2 py-0.5 rounded-full">
-          <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-          <span>{lang === 'ar' ? 'متصل' : 'v2 Desktop'}</span>
+        <div className={`hidden sm:flex items-center gap-1 text-[10px] font-mono px-2 py-0.5 rounded-full ${isConnected ? 'text-emerald-400 bg-emerald-500/10 border border-emerald-500/20' : 'text-amber-300 bg-amber-500/10 border border-amber-500/20'}`}>
+          <span className={`w-1.5 h-1.5 rounded-full ${isConnected ? 'bg-emerald-400' : 'bg-amber-400'} ${isConnected ? 'animate-pulse' : ''}`} />
+          <span>{isConnected ? (lang === 'ar' ? 'متصل' : 'Connected') : (lang === 'ar' ? 'غير متصل' : 'Offline')}</span>
         </div>
       </div>
 

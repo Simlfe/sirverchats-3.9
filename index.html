@@ -11,6 +11,30 @@
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=Alexandria:wght@400;600;700;800&family=Almarai:wght@400;700;800&family=Cairo:wght@300;400;500;600;700;800&family=Cinzel+Decorative:wght@700;900&family=Cinzel:wght@500;700;900&family=DM+Sans:ital,opsz,wght@0,9..40,400..800&family=El+Messiri:wght@500;600;700&family=Fira+Code:wght@400;500;700&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&family=Lexend:wght@400;500;600;700&family=Nunito:wght@400;600;700;800;900&family=Orbitron:wght@500;700;900&family=Outfit:wght@400;500;600;700;800&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=Poppins:wght@400;500;600;700&family=Readex+Pro:wght@400;500;600;700&family=Rubik:wght@400;500;600;700&family=Sora:wght@400;500;600;700;800&family=Space+Grotesk:wght@400;500;600;700&family=Syne:wght@500;700;800&family=Tajawal:wght@400;500;700;800&family=Urbanist:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+    <style>
+      /* Paint a tiny, dependency-free shell while the React bundle is being
+         fetched. React replaces this node on its first render; if a script or
+         network request fails, the user still gets an actionable status rather
+         than a white page. */
+      #startup-shell {
+        min-height: 100dvh;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 24px;
+        color: #dfe8d1;
+        background: #151a12;
+        font-family: Inter, system-ui, sans-serif;
+      }
+      #startup-shell > div { width: min(360px, 100%); }
+      #startup-shell .startup-brand { display: flex; align-items: center; gap: 10px; font-weight: 700; letter-spacing: .01em; }
+      #startup-shell .startup-dot { width: 12px; height: 12px; border-radius: 999px; background: #7bae37; box-shadow: 0 0 0 5px rgba(123,174,55,.15); }
+      #startup-shell .startup-line { height: 10px; margin-top: 18px; border-radius: 999px; background: rgba(223,232,209,.13); overflow: hidden; }
+      #startup-shell .startup-line::after { content: ''; display: block; width: 42%; height: 100%; border-radius: inherit; background: #7bae37; animation: startup-progress 1.25s ease-in-out infinite; }
+      #startup-shell .startup-copy { margin-top: 10px; color: rgba(223,232,209,.62); font-size: 12px; }
+      @keyframes startup-progress { 0% { transform: translateX(-120%); } 55%, 100% { transform: translateX(260%); } }
+      @media (prefers-reduced-motion: reduce) { #startup-shell .startup-line::after { animation: none; width: 65%; } }
+    </style>
     <script>
       (function() {
         try {
@@ -46,7 +70,15 @@
     </script>
   </head>
   <body>
-    <div id="root"></div>
+    <div id="root">
+      <div id="startup-shell" role="status" aria-live="polite">
+        <div>
+          <div class="startup-brand"><span class="startup-dot" aria-hidden="true"></span><span>SirverData</span></div>
+          <div class="startup-line" aria-hidden="true"></div>
+          <div class="startup-copy">Preparing your workspace…</div>
+        </div>
+      </div>
+    </div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

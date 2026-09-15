@@ -42,7 +42,9 @@ class WebSocketService {
 
   constructor() {
     this.initBroadcastChannel();
-    this.connect();
+    // Do not open a socket while the module graph is being evaluated.  The
+    // app renders cached content first and explicitly starts realtime after
+    // the first paint (or on the first call/presence action).
   }
 
   private initBroadcastChannel() {

@@ -1,4 +1,4 @@
-name: Build Tauri Android App
+name: Build and Deploy Android App
 
 on:
   push:
@@ -36,17 +36,7 @@ jobs:
           distribution: 'temurin'
           java-version: '21'
           cache: 'gradle'
-          cache-dependency-path: 'src-tauri/gen/android/**/*.gradle*'
-
-      - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: aarch64-linux-android
-
-      - name: Cache Rust dependencies
-        uses: swatinem/rust-cache@v2
-        with:
-          workspaces: './src-tauri -> target'
+          cache-dependency-path: 'android/**/*.gradle*'
 
       - name: Accept Android SDK Licenses
         run: |
@@ -55,23 +45,48 @@ jobs:
       - name: Install Frontend Dependencies
         run: npm ci --no-audit --no-fund
 
-      - name: Ensure Tauri Android project is initialized
-        run: npx tauri android init --ci --skip-targets-install
+      - name: Build Web Assets
+        run: npm run build
 
-      - name: Build Tauri Android debug APK (arm64)
-        run: npx tauri android build --debug --target aarch64 --split-per-abi --apk --ci
+      - name: Sync Capacitor Android Project
+        run: npx cap sync android
+
+      - name: Grant Execute Permission to gradlew
+        run: chmod +x android/gradlew
+
+      - name: Build Capacitor Android debug APK
+        working-directory: android
+        run: ./gradlew assembleDebug --no-daemon --stacktrace
 
       - name: Upload Android Debug APK
         uses: actions/upload-artifact@v4
         with:
-          name: SirverData-Tauri-Android-Debug-APK
-          path: src-tauri/gen/android/app/build/outputs/apk/**/*.apk
+          name: SirverData-Android-Debug-APK
+          path: android/app/build/outputs/apk/debug/*.apk
+          if-no-files-found: warn
+
+      - name: Build unsigned release APK and AAB (tags/manual runs)
+        if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+        working-directory: android
+        run: ./gradlew assembleRelease bundleRelease --no-daemon --stacktrace
+
+      - name: Upload Android release artifacts
+        if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@v4
+        with:
+          name: SirverData-Android-Release
+          path: |
+            android/app/build/outputs/apk/release/*.apk
+            android/app/build/outputs/bundle/release/*.aab
           if-no-files-found: warn
 
       - name: Attach APK to GitHub Release
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          files: src-tauri/gen/android/app/build/outputs/apk/**/*.apk
+          files: |
+            android/app/build/outputs/apk/debug/*.apk
+            android/app/build/outputs/apk/release/*.apk
+            android/app/build/outputs/bundle/release/*.aab
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

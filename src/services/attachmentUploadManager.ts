@@ -5,7 +5,8 @@ export type UploadStatus = 'queued' | 'uploading' | 'completed' | 'failed' | 'ca
 
 export interface UploadItem {
   id: string; // unique local attachment ID
-  file: File; // File object to upload
+  file: File; // Optimized working copy used for local processing/UI
+  originalFile: File; // Untouched source; always stored as the attachment file
   originalFilename: string;
   mimeType: string;
   size: number;
@@ -54,7 +55,7 @@ class AttachmentUploadManagerClass {
   /**
    * Enqueue a new file for immediate background upload
    */
-  enqueue(id: string, file: File, isPrivate: boolean = false): UploadItem {
+  enqueue(id: string, file: File, isPrivate: boolean = false, originalFile: File = file): UploadItem {
     const existing = this.uploads.get(id);
     if (existing && !existing.isRemoved && (existing.status === 'uploading' || existing.status === 'completed')) {
       return existing;
@@ -63,9 +64,10 @@ class AttachmentUploadManagerClass {
     const item: UploadItem = {
       id,
       file,
-      originalFilename: file.name,
-      mimeType: file.type || 'application/octet-stream',
-      size: file.size,
+      originalFile,
+      originalFilename: originalFile.name,
+      mimeType: originalFile.type || file.type || 'application/octet-stream',
+      size: originalFile.size,
       progress: 0,
       status: 'queued',
       isPrivate,
@@ -216,7 +218,11 @@ class AttachmentUploadManagerClass {
     try {
       const attachment = await pbService.uploadAttachmentWithProgress(
         '', // Empty messageId: will be linked once message is sent
-        item.file,
+        // The original remains downloadable/full-resolution. Optimized copies
+        // are never substituted for the canonical attachment file; the
+        // PocketBase `thumbnail` field is generated separately by the upload
+        // service.
+        item.originalFile || item.file,
         (pct) => {
           if (item.status === 'uploading' && !item.isRemoved) {
             item.progress = pct;

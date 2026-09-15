@@ -1,16 +1,40 @@
-import { Server, Channel, Message } from '../types';
+import { Server, Channel, Message, ConversationKind, MessageCursor, MessagePage } from '../types';
 import { MessageDeletionService } from './messageDeletionService';
+import { cursorKey, dedupeMessages, MAX_ACTIVE_MESSAGES } from './messagePagination';
 
 const DB_NAME = 'SirverOfflineCacheDB';
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 
 const STORES = {
   SERVERS: 'servers',
   CHANNELS: 'channels',
   DM_CHANNELS: 'dm_channels',
   MESSAGES: 'messages',
+  MESSAGE_PAGES: 'message_pages',
+  MESSAGE_METADATA: 'message_metadata',
   META: 'meta',
 };
+
+export interface MessageCacheMetadata {
+  kind: ConversationKind;
+  conversationId: string;
+  newestCursor: MessageCursor | null;
+  oldestCursor: MessageCursor | null;
+  cachedPagesAvailable: number;
+  remoteHasMore: boolean;
+  updatedAt: number;
+}
+
+export interface CachedMessagePage {
+  key: string;
+  kind: ConversationKind;
+  conversationId: string;
+  cursor: MessageCursor | null;
+  items: Message[];
+  nextCursor: MessageCursor | null;
+  hasMore: boolean;
+  savedAt: number;
+}
 
 class OfflineCacheService {
   private dbPromise: Promise<IDBDatabase> | null = null;
@@ -19,6 +43,8 @@ class OfflineCacheService {
   private memChannels: Map<string, Channel[]> = new Map();
   private memDmChannels: Map<string, Channel[]> = new Map();
   private memMessages: Map<string, { items: Message[]; hasMore: boolean; page: number; lastSyncTime: number }> = new Map();
+  private memMessagePages: Map<string, CachedMessagePage> = new Map();
+  private memMessageMetadata: Map<string, MessageCacheMetadata> = new Map();
 
   private getDB(): Promise<IDBDatabase> {
     if (this.dbPromise) return this.dbPromise;
@@ -44,6 +70,22 @@ class OfflineCacheService {
         }
         if (!db.objectStoreNames.contains(STORES.MESSAGES)) {
           db.createObjectStore(STORES.MESSAGES, { keyPath: 'channelId' });
+        }
+        const pages = db.objectStoreNames.contains(STORES.MESSAGE_PAGES)
+          ? request.transaction?.objectStore(STORES.MESSAGE_PAGES)
+          : db.createObjectStore(STORES.MESSAGE_PAGES, { keyPath: 'key' });
+        // Existing installs may have the store from an earlier partial
+        // rollout without the indexes. Add them during the version bump so
+        // cached-page reveal remains reliable instead of silently falling
+        // back to a network request on every scroll.
+        if (pages && !pages.indexNames.contains('conversation')) {
+          pages.createIndex('conversation', ['kind', 'conversationId'], { unique: false });
+        }
+        if (pages && !pages.indexNames.contains('savedAt')) {
+          pages.createIndex('savedAt', 'savedAt', { unique: false });
+        }
+        if (!db.objectStoreNames.contains(STORES.MESSAGE_METADATA)) {
+          db.createObjectStore(STORES.MESSAGE_METADATA, { keyPath: 'key' });
         }
         if (!db.objectStoreNames.contains(STORES.META)) {
           db.createObjectStore(STORES.META, { keyPath: 'key' });
@@ -261,6 +303,150 @@ class OfflineCacheService {
     }
   }
 
+  // --- CURSOR MESSAGE PAGES ---
+  private messageMetadataKey(kind: ConversationKind, conversationId: string): string {
+    return `${kind}:${conversationId}`;
+  }
+
+  private messagePageKey(kind: ConversationKind, conversationId: string, cursor: MessageCursor | null): string {
+    return `${this.messageMetadataKey(kind, conversationId)}:${cursorKey(cursor)}`;
+  }
+
+  getMessageMetadataSync(kind: ConversationKind, conversationId: string): MessageCacheMetadata | null {
+    return this.memMessageMetadata.get(this.messageMetadataKey(kind, conversationId)) || null;
+  }
+
+  async getMessageMetadata(kind: ConversationKind, conversationId: string): Promise<MessageCacheMetadata | null> {
+    const sync = this.getMessageMetadataSync(kind, conversationId);
+    if (sync) return sync;
+    try {
+      const db = await this.getDB();
+      return await new Promise((resolve) => {
+        const req = db.transaction(STORES.MESSAGE_METADATA, 'readonly')
+          .objectStore(STORES.MESSAGE_METADATA)
+          .get(this.messageMetadataKey(kind, conversationId));
+        req.onsuccess = () => {
+          const value = req.result as MessageCacheMetadata | undefined;
+          if (value) this.memMessageMetadata.set(this.messageMetadataKey(kind, conversationId), value);
+          resolve(value || null);
+        };
+        req.onerror = () => resolve(null);
+      });
+    } catch {
+      return null;
+    }
+  }
+
+  async saveMessageMetadata(metadata: MessageCacheMetadata): Promise<void> {
+    const key = this.messageMetadataKey(metadata.kind, metadata.conversationId);
+    this.memMessageMetadata.set(key, metadata);
+    try {
+      const db = await this.getDB();
+      await new Promise<void>((resolve) => {
+        const req = db.transaction(STORES.MESSAGE_METADATA, 'readwrite')
+          .objectStore(STORES.MESSAGE_METADATA)
+          .put({ ...metadata, key });
+        req.onsuccess = () => resolve();
+        req.onerror = () => resolve();
+      });
+    } catch {
+      // IndexedDB is an enhancement; the in-memory cache remains usable.
+    }
+  }
+
+  getMessagePageSync(kind: ConversationKind, conversationId: string, cursor: MessageCursor | null = null): CachedMessagePage | null {
+    return this.memMessagePages.get(this.messagePageKey(kind, conversationId, cursor)) || null;
+  }
+
+  async getMessagePage(kind: ConversationKind, conversationId: string, cursor: MessageCursor | null = null): Promise<CachedMessagePage | null> {
+    const key = this.messagePageKey(kind, conversationId, cursor);
+    const sync = this.memMessagePages.get(key);
+    if (sync) return sync;
+    try {
+      const db = await this.getDB();
+      return await new Promise((resolve) => {
+        const req = db.transaction(STORES.MESSAGE_PAGES, 'readonly').objectStore(STORES.MESSAGE_PAGES).get(key);
+        req.onsuccess = () => {
+          const value = req.result as CachedMessagePage | undefined;
+          if (value) this.memMessagePages.set(key, value);
+          resolve(value || null);
+        };
+        req.onerror = () => resolve(null);
+      });
+    } catch {
+      return null;
+    }
+  }
+
+  async saveMessagePage(
+    kind: ConversationKind,
+    conversationId: string,
+    page: MessagePage<Message>,
+    cursor: MessageCursor | null = null,
+  ): Promise<void> {
+    const key = this.messagePageKey(kind, conversationId, cursor);
+    const alreadyStored = this.memMessagePages.has(key);
+    const record: CachedMessagePage = {
+      key,
+      kind,
+      conversationId,
+      cursor,
+      items: dedupeMessages(page.items),
+      nextCursor: page.nextCursor,
+      hasMore: page.hasMore,
+      savedAt: Date.now(),
+    };
+    this.memMessagePages.set(key, record);
+
+    const previous = this.getMessageMetadataSync(kind, conversationId);
+    const nextMetadata: MessageCacheMetadata = {
+      kind,
+      conversationId,
+      newestCursor: previous?.newestCursor || (record.items.length ? { created: record.items[record.items.length - 1].created || '', id: record.items[record.items.length - 1].id } : null),
+      oldestCursor: record.nextCursor || previous?.oldestCursor || (record.items.length ? { created: record.items[0].created || '', id: record.items[0].id } : null),
+      cachedPagesAvailable: Math.max(1, (previous?.cachedPagesAvailable || 0) + (alreadyStored ? 0 : 1)),
+      // An empty response is not evidence that remote history is exhausted.
+      remoteHasMore: record.items.length === 0 ? (previous?.remoteHasMore ?? true) : page.hasMore,
+      updatedAt: Date.now(),
+    };
+    await Promise.all([
+      this.saveMessageMetadata(nextMetadata),
+      (async () => {
+        try {
+          const db = await this.getDB();
+          await new Promise<void>((resolve) => {
+            const req = db.transaction(STORES.MESSAGE_PAGES, 'readwrite').objectStore(STORES.MESSAGE_PAGES).put(record);
+            req.onsuccess = () => resolve();
+            req.onerror = () => resolve();
+          });
+        } catch {
+          // Ignore storage quota/availability failures.
+        }
+      })(),
+    ]);
+  }
+
+  async listMessagePages(kind: ConversationKind, conversationId: string): Promise<CachedMessagePage[]> {
+    const prefix = `${this.messageMetadataKey(kind, conversationId)}:`;
+    const fromMemory = Array.from(this.memMessagePages.values()).filter((page) => page.key.startsWith(prefix));
+    if (fromMemory.length > 0) return fromMemory.sort((a, b) => a.savedAt - b.savedAt);
+    try {
+      const db = await this.getDB();
+      return await new Promise((resolve) => {
+        const req = db.transaction(STORES.MESSAGE_PAGES, 'readonly').objectStore(STORES.MESSAGE_PAGES)
+          .index('conversation').getAll(IDBKeyRange.only([kind, conversationId]));
+        req.onsuccess = () => {
+          const rows = (req.result || []) as CachedMessagePage[];
+          rows.forEach((row) => this.memMessagePages.set(row.key, row));
+          resolve(rows.sort((a, b) => a.savedAt - b.savedAt));
+        };
+        req.onerror = () => resolve([]);
+      });
+    } catch {
+      return [];
+    }
+  }
+
   // --- MESSAGES ---
   getCachedMessagesSync(channelId: string): {
     items: Message[];
@@ -289,7 +475,10 @@ class OfflineCacheService {
         req.onsuccess = () => {
           if (req.result && Array.isArray(req.result.items)) {
             const data = {
-              items: req.result.items,
+              // Legacy aggregate rows are only an acceleration cache. Keep
+              // their in-memory/row payload bounded; full history lives in
+              // the cursor-keyed MESSAGE_PAGES store.
+              items: dedupeMessages(req.result.items, MAX_ACTIVE_MESSAGES),
               hasMore: Boolean(req.result.hasMore),
               page: req.result.page || 1,
               lastSyncTime: req.result.lastSyncTime || 0,
@@ -315,7 +504,10 @@ class OfflineCacheService {
     page: number = 1
   ): Promise<void> {
     const data = {
-      items: messages,
+      // Never let the compatibility aggregate cache grow with every scroll.
+      // This does not evict cursor pages from IndexedDB, so remote history is
+      // still available for later reveal.
+      items: dedupeMessages(messages, MAX_ACTIVE_MESSAGES),
       hasMore,
       page,
       lastSyncTime: Date.now(),
@@ -329,7 +521,7 @@ class OfflineCacheService {
         const store = tx.objectStore(STORES.MESSAGES);
         store.put({
           channelId,
-          items: messages,
+          items: dedupeMessages(messages, MAX_ACTIVE_MESSAGES),
           hasMore,
           page,
           lastSyncTime: Date.now(),
@@ -396,13 +588,13 @@ class OfflineCacheService {
     }
 
     // Sort strictly by created timestamp ascending
-    const mergedList = Array.from(existingMap.values()).sort((a, b) => {
-      const tA = new Date(a.created || 0).getTime();
-      const tB = new Date(b.created || 0).getTime();
-      return tA - tB;
-    });
+    const mergedList = dedupeMessages(Array.from(existingMap.values()));
 
-    const finalHasMore = hasMore !== undefined ? hasMore : cached.hasMore;
+    // A failed/empty page must never turn a populated cache into an exhausted
+    // history. Only a non-empty page is authoritative for the remote cursor.
+    const finalHasMore = incoming.length === 0 && hasMore === false
+      ? cached.hasMore
+      : hasMore !== undefined ? hasMore : cached.hasMore;
     const finalPage = page !== undefined ? Math.max(page, cached.page) : cached.page;
 
     this.saveCachedMessages(channelId, mergedList, finalHasMore, finalPage);
@@ -472,13 +664,11 @@ class OfflineCacheService {
       }
     }
 
-    const mergedList = Array.from(existingMap.values()).sort((a, b) => {
-      const tA = new Date(a.created || 0).getTime();
-      const tB = new Date(b.created || 0).getTime();
-      return tA - tB;
-    });
+    const mergedList = dedupeMessages(Array.from(existingMap.values()));
 
-    const finalHasMore = hasMore !== undefined ? hasMore : cached.hasMore;
+    const finalHasMore = incoming.length === 0 && hasMore === false
+      ? cached.hasMore
+      : hasMore !== undefined ? hasMore : cached.hasMore;
     const finalPage = page !== undefined ? Math.max(page, cached.page) : cached.page;
 
     this.saveCachedMessages(channelId, mergedList, finalHasMore, finalPage);
@@ -541,10 +731,18 @@ class OfflineCacheService {
         STORES.CHANNELS,
         STORES.DM_CHANNELS,
         STORES.MESSAGES,
+        STORES.MESSAGE_PAGES,
+        STORES.MESSAGE_METADATA,
         STORES.META,
       ];
       const tx = db.transaction(stores, 'readwrite');
       stores.forEach((s) => tx.objectStore(s).clear());
+      this.memServers.clear();
+      this.memChannels.clear();
+      this.memDmChannels.clear();
+      this.memMessages.clear();
+      this.memMessagePages.clear();
+      this.memMessageMetadata.clear();
     } catch (e) {
       console.warn('Failed to clear user cache in IndexedDB:', e);
     }

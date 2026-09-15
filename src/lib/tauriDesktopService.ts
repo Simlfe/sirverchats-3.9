@@ -1,11 +1,18 @@
-import { getCurrentWindow } from '@tauri-apps/api/window';
-import { documentDir, downloadDir, homeDir, join } from '@tauri-apps/api/path';
-import { listen, UnlistenFn } from '@tauri-apps/api/event';
-import { invoke } from '@tauri-apps/api/core';
-import { openUrl, openPath } from '@tauri-apps/plugin-opener';
-import { open as openShell } from '@tauri-apps/plugin-shell';
-import { open as openDialog } from '@tauri-apps/plugin-dialog';
-import { mkdir, exists, readFile, writeFile, remove } from '@tauri-apps/plugin-fs';
+import type { UnlistenFn } from '@tauri-apps/api/event';
+
+// Keep the desktop bridge out of the browser/mobile startup graph.  This
+// module is imported by the shell for lightweight platform detection, while
+// the native Tauri plugins are loaded only when a desktop action is invoked.
+// Besides reducing the initial bundle, this prevents plugin initialization
+// from opening a browser/download flow during app startup.
+const loadTauriWindow = () => import('@tauri-apps/api/window');
+const loadTauriPath = () => import('@tauri-apps/api/path');
+const loadTauriEvent = () => import('@tauri-apps/api/event');
+const loadTauriCore = () => import('@tauri-apps/api/core');
+const loadTauriOpener = () => import('@tauri-apps/plugin-opener');
+const loadTauriShell = () => import('@tauri-apps/plugin-shell');
+const loadTauriDialog = () => import('@tauri-apps/plugin-dialog');
+const loadTauriFs = () => import('@tauri-apps/plugin-fs');
 
 export type TargetOS = 'windows' | 'linux' | 'android' | 'macos' | 'unknown';
 
@@ -97,6 +104,7 @@ export function setCustomDownloadDirSetting(path: string | null): void {
 export async function selectFolderWithNativeDialog(): Promise<string | null> {
   if (isTauriEnvironment()) {
     try {
+      const { open: openDialog } = await loadTauriDialog();
       const selected = await openDialog({
         directory: true,
         multiple: false,
@@ -122,6 +130,7 @@ export async function selectFolderWithNativeDialog(): Promise<string | null> {
       console.warn('[TauriDesktopService] window.__TAURI__.dialog.open error:', e);
     }
     try {
+      const { invoke } = await loadTauriCore();
       const selected = await invoke<string>('plugin:dialog|open', {
         directory: true,
         multiple: false,
@@ -148,6 +157,7 @@ export async function getDownloadDirectory(): Promise<string> {
     const trimmed = customDir.trim();
     if (isTauriEnvironment()) {
       try {
+        const { exists, mkdir } = await loadTauriFs();
         const dirExists = await exists(trimmed).catch(() => false);
         if (!dirExists) {
           await mkdir(trimmed, { recursive: true }).catch(() => false);
@@ -168,6 +178,7 @@ export async function getDownloadDirectory(): Promise<string> {
   // 2. Resolve default OS user downloads directory dynamically via platform OS APIs
   if (isTauriEnvironment()) {
     try {
+      const { downloadDir, documentDir, homeDir, join } = await loadTauriPath();
       const dDir = await downloadDir().catch(() => null);
       if (dDir) {
         return dDir;
@@ -198,6 +209,7 @@ export async function ensureDownloadDirectoryExists(): Promise<string> {
   const dirPath = await getDownloadDirectory();
   if (isTauriEnvironment()) {
     try {
+      const { exists, mkdir } = await loadTauriFs();
       const dirExists = await exists(dirPath).catch(() => false);
       if (!dirExists) {
         await mkdir(dirPath, { recursive: true });
@@ -230,6 +242,7 @@ export async function openPathExternally(targetPath: string): Promise<boolean> {
 
     // Ensure directory exists if targetPath is a folder
     try {
+      const { exists, mkdir } = await loadTauriFs();
       const isDir = !targetPath.includes('.') || targetPath.endsWith('/') || targetPath.endsWith('\\');
       if (isDir) {
         const dirExists = await exists(targetPath).catch(() => false);
@@ -241,6 +254,7 @@ export async function openPathExternally(targetPath: string): Promise<boolean> {
 
     // 1. Try Tauri v2 plugin-opener openPath
     try {
+      const { openPath } = await loadTauriOpener();
       await openPath(targetPath);
       return true;
     } catch (e) {
@@ -261,10 +275,12 @@ export async function openPathExternally(targetPath: string): Promise<boolean> {
     }
     // 3. Try Tauri v2 plugin-shell openShell
     try {
+      const { open: openShell } = await loadTauriShell();
       await openShell(targetPath);
       return true;
     } catch (e) {
       try {
+        const { invoke } = await loadTauriCore();
         await invoke('plugin:opener|open_path', { path: targetPath });
         return true;
       } catch (err) {
@@ -296,6 +312,7 @@ export async function saveFileToTauriDisk(
   }
 
   try {
+    const { exists, mkdir, writeFile } = await loadTauriFs();
     // 1. Ensure parent directory exists
     const lastSepIdx = Math.max(fullPath.lastIndexOf('/'), fullPath.lastIndexOf('\\'));
     if (lastSepIdx !== -1) {
@@ -338,6 +355,7 @@ export async function saveFileToTauriDisk(
 export async function removeFileFromTauriDisk(fullPath: string): Promise<boolean> {
   if (!isTauriEnvironment()) return false;
   try {
+    const { exists, remove } = await loadTauriFs();
     const fileExists = await exists(fullPath).catch(() => false);
     if (fileExists) {
       await remove(fullPath);
@@ -356,6 +374,7 @@ export async function removeFileFromTauriDisk(fullPath: string): Promise<boolean
 export async function checkFileExistsOnDisk(fullPath: string): Promise<boolean> {
   if (!isTauriEnvironment()) return false;
   try {
+    const { exists } = await loadTauriFs();
     return await exists(fullPath);
   } catch (e) {
     return false;
@@ -370,6 +389,7 @@ export async function openExternalUrl(url: string): Promise<boolean> {
   if (isTauriEnvironment()) {
     // 1. Try Tauri v2 plugin-opener openUrl
     try {
+      const { openUrl } = await loadTauriOpener();
       await openUrl(url);
       return true;
     } catch (e) {
@@ -377,10 +397,12 @@ export async function openExternalUrl(url: string): Promise<boolean> {
     }
     // 2. Try Tauri v2 plugin-shell openShell
     try {
+      const { open: openShell } = await loadTauriShell();
       await openShell(url);
       return true;
     } catch (e) {
       try {
+        const { invoke } = await loadTauriCore();
         await invoke('plugin:opener|open_url', { url });
         return true;
       } catch (err) {}
@@ -427,12 +449,14 @@ export async function openFileExternally(targetPath: string, objectUrl?: string)
 export async function executeSilentMsiInstall(msiFilePath: string): Promise<boolean> {
   if (isTauriEnvironment()) {
     try {
+      const { invoke } = await loadTauriCore();
       await invoke('execute_silent_msi', { path: msiFilePath });
       return true;
     } catch (e) {
       console.warn('Tauri invoke execute_silent_msi error:', e);
     }
     try {
+      const { open: openShell } = await loadTauriShell();
       await (openShell as any)('msiexec', ['/i', msiFilePath, '/qn', '/norestart']);
       return true;
     } catch (e) {
@@ -449,10 +473,12 @@ export async function executeSilentMsiInstall(msiFilePath: string): Promise<bool
 export async function minimizeWindow(): Promise<void> {
   if (isTauriEnvironment()) {
     try {
+      const { invoke } = await loadTauriCore();
       await invoke('minimize_window');
       return;
     } catch (e) {}
     try {
+      const { getCurrentWindow } = await loadTauriWindow();
       const appWindow = getCurrentWindow();
       await appWindow.minimize();
       return;
@@ -471,6 +497,7 @@ export async function minimizeWindow(): Promise<void> {
 export async function showAndFocusWindow(): Promise<void> {
   if (isTauriEnvironment()) {
     try {
+      const { getCurrentWindow } = await loadTauriWindow();
       const appWindow = getCurrentWindow();
       await appWindow.show();
       await appWindow.unminimize();
@@ -488,10 +515,12 @@ export async function showAndFocusWindow(): Promise<void> {
 export async function toggleMaximizeWindow(): Promise<boolean> {
   if (isTauriEnvironment()) {
     try {
+      const { invoke } = await loadTauriCore();
       const res = await invoke<boolean>('toggle_maximize_window');
       return res;
     } catch (e) {}
     try {
+      const { getCurrentWindow } = await loadTauriWindow();
       const appWindow = getCurrentWindow();
       const isMax = await appWindow.isMaximized();
       if (isMax) {
@@ -532,16 +561,19 @@ export async function toggleMaximizeWindow(): Promise<boolean> {
 export async function closeWindow(): Promise<void> {
   if (isTauriEnvironment()) {
     try {
+      const { invoke } = await loadTauriCore();
       await invoke('close_to_tray');
       return;
     } catch (e) {}
     try {
+      const { getCurrentWindow } = await loadTauriWindow();
       const appWindow = getCurrentWindow();
       await appWindow.hide();
       return;
     } catch (e) {
       console.warn('Hide window via appWindow.hide() failed:', e);
       try {
+        const { getCurrentWindow } = await loadTauriWindow();
         const appWindow = getCurrentWindow();
         await appWindow.minimize();
         return;
@@ -566,6 +598,7 @@ export async function closeWindow(): Promise<void> {
 export async function setupWindowCloseRequestedListener(): Promise<UnlistenFn | null> {
   if (!isTauriEnvironment()) return null;
   try {
+    const { getCurrentWindow } = await loadTauriWindow();
     const appWindow = getCurrentWindow();
     if (appWindow && typeof appWindow.onCloseRequested === 'function') {
       const unlisten = await appWindow.onCloseRequested(async (event) => {
@@ -584,6 +617,8 @@ export async function setupWindowCloseRequestedListener(): Promise<UnlistenFn | 
 
 export async function isWindowMaximized(): Promise<boolean> {
   try {
+    if (!isTauriEnvironment()) return Boolean(document.fullscreenElement);
+    const { getCurrentWindow } = await loadTauriWindow();
     const appWindow = getCurrentWindow();
     return await appWindow.isMaximized();
   } catch (e) {
@@ -593,6 +628,8 @@ export async function isWindowMaximized(): Promise<boolean> {
 
 export async function startWindowDragging(): Promise<void> {
   try {
+    if (!isTauriEnvironment()) return;
+    const { getCurrentWindow } = await loadTauriWindow();
     const appWindow = getCurrentWindow();
     await appWindow.startDragging();
   } catch (e) {
@@ -632,6 +669,7 @@ export async function createRealFileFromLocalPath(filePath: string): Promise<Fil
   const fileName = filePath.split(/[/\\]/).pop() || 'attachment_file';
   if (isTauriEnvironment()) {
     try {
+      const { readFile } = await loadTauriFs();
       const bytes = await readFile(filePath);
       return new File([bytes], fileName, { type: 'application/octet-stream' });
     } catch (e) {
@@ -648,6 +686,7 @@ export async function setupTauriFileDropListener(
   if (!isTauriEnvironment()) return null;
 
   try {
+    const { getCurrentWindow } = await loadTauriWindow();
     const appWindow = getCurrentWindow();
     if (appWindow && typeof appWindow.onDragDropEvent === 'function') {
       const unlisten = await appWindow.onDragDropEvent(async (event) => {
@@ -672,6 +711,7 @@ export async function setupTauriFileDropListener(
 
   // Fallback: listen for 'tauri://drag-drop'
   try {
+    const { listen } = await loadTauriEvent();
     const unlisten = await listen<any>('tauri://drag-drop', async (event) => {
       const payload = event.payload;
       let paths: string[] = [];

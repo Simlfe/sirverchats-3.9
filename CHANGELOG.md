@@ -1,5 +1,26 @@
 # Sirver Application Changelog
 
+## [3.9-performance-remediation] - 2026-09-15
+### Cache-first startup, cursor history, and thumbnail-safe media
+- Added a compact last-session snapshot so cached servers, channels, DMs, drafts,
+  scroll positions, and newest messages render before network synchronization.
+- Added shared `{created,id}` cursor pagination (30 newest messages, 50 older
+  messages), independent cached-page/remote-history state, duplicate protection,
+  anchored prepends, and a bounded 500-message active-memory window.
+- Added IndexedDB cursor pages/metadata stores without an arbitrary cache trim;
+  cache eviction or empty responses no longer report remote history as exhausted.
+- Removed realtime raw-plus-expanded duplicate record fetches and capped live
+  in-memory message caches.
+- Added separate 480px image thumbnail generation/upload fields and switched the
+  feed to lazy thumbnail URLs; originals are fetched only by explicit viewers or
+  downloads. Video previews use poster thumbnails.
+- Added cursor unit tests and a CI quality gate for typecheck, tests, web build,
+  Capacitor Android compilation, and Tauri Linux compilation.
+- Added bounded three-second deadlines to critical PocketBase server, channel,
+  DM, profile, and message reads so a sleeping VPS cannot leave an endless
+  loading state. Desktop update checks now wait until after first paint and
+  never auto-download an update during startup.
+
 ## [3.9-update-ui] - 2026-09-14
 ### Non-Intrusive Update Status
 - Removed all automatic updater overlays from the main chat interface, including

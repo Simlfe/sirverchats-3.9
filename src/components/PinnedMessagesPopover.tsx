@@ -5,6 +5,7 @@ import { Pin, PinOff, X, Aperture, Copy, Check } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { AudioAttachmentPlayer } from './MusicPlayer';
 import { MessageDeletionService } from '../services/messageDeletionService';
+import { getAttachmentThumbnailUrl } from '../services/attachmentPreview';
 import {
   isAttachmentImage,
   isAttachmentVideo,
@@ -251,7 +252,7 @@ export default function PinnedMessagesPopover({
                                 {pinnedNonAudio.length > 4 ? (
                                   <div className="grid grid-cols-2 gap-1.5 mt-1">
                                     {pinnedNonAudio.slice(0, 3).map((a) => {
-                                      const aUrl = getAttachmentUrl(a);
+                                      const previewUrl = getAttachmentThumbnailUrl(a);
                                       const isFailed = failedImageIds.has(a.id);
                                       const isUnrenderable = isAttachmentUnrenderable(
                                         a.file,
@@ -271,7 +272,8 @@ export default function PinnedMessagesPopover({
                                         >
                                           {isImg ? (
                                             <UploadedImagePreview
-                                              src={aUrl}
+                                              src={previewUrl}
+                                              useSourceDirect
                                               alt="Attachment"
                                               maxPreviewWidth={300}
                                               maxPreviewHeight={300}
@@ -316,7 +318,8 @@ export default function PinnedMessagesPopover({
                                         failedImageIds.has(pinnedNonAudio[3]?.id)
                                       ) ? (
                                         <UploadedImagePreview
-                                          src={getAttachmentUrl(pinnedNonAudio[3])}
+                                          src={getAttachmentThumbnailUrl(pinnedNonAudio[3])}
+                                          useSourceDirect
                                           alt="Attachment"
                                           maxPreviewWidth={300}
                                           maxPreviewHeight={300}
@@ -358,6 +361,7 @@ export default function PinnedMessagesPopover({
                                 ) : (
                                   pinnedNonAudio.map((a, idx) => {
                                     const aUrl = getAttachmentUrl(a);
+                                    const previewUrl = getAttachmentThumbnailUrl(a);
                                     const isFailed = failedImageIds.has(a.id);
                                     const isUnrenderable = isAttachmentUnrenderable(
                                       a.file,
@@ -370,7 +374,8 @@ export default function PinnedMessagesPopover({
                                       return (
                                         <UploadedImagePreview
                                           key={a.id}
-                                          src={aUrl}
+                                          src={previewUrl}
+                                          useSourceDirect
                                           alt="Attachment"
                                           maxPreviewWidth={480}
                                           maxPreviewHeight={360}
