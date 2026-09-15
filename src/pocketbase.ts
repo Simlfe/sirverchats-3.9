@@ -1,4 +1,5 @@
 import PocketBase from 'pocketbase';
+import { watchRealtimeCredentials } from './services/realtimeAuthLifecycle';
 import { parseReactions, toggleReactionInList } from './components/MessageReactions';
 import { User, Server, Channel, Message, Attachment, Call, ServerMember, Translation, NotificationItem, ServerRole, ServerOptionInvite, ChannelOptions, DownloadedFileRecord, AppUpdateRecord, ServerEmoji, MessageCursor, MessagePage } from './types';
 import { MessageDeletionService, DeleteMessageOptions } from './services/messageDeletionService';
@@ -901,7 +902,15 @@ class PocketBaseService {
     return true;
   }
 
+  private realtimeAuthLifecycle?: ReturnType<typeof watchRealtimeCredentials>;
+
   private initPbInstance(pbInstance: PocketBase) {
+    this.realtimeAuthLifecycle?.dispose();
+    this.realtimeAuthLifecycle = watchRealtimeCredentials(pbInstance.authStore, async () => {
+      if (this.pb !== pbInstance) return;
+      await pbInstance.realtime.unsubscribe();
+      if (this.pb === pbInstance) this.resubscribeAllRealtime();
+    });
     pbInstance.autoCancellation(false);
     pbInstance.beforeSend = (url, options) => {
       if (url.includes('/api/files/')) {
@@ -921,31 +930,11 @@ class PocketBaseService {
     pbInstance.afterSend = (response, data) => {
       if (response.status === 400 && typeof data?.message === 'string' && data.message.includes("authorization don't match")) {
         console.warn('PocketBase auth mismatch detected. Resetting realtime SSE connection.');
-        try {
-          pbInstance.realtime.unsubscribe().catch(() => {});
-        } catch (e) {}
-        try {
-          pbInstance.cancelAllRequests();
-        } catch (e) {}
-        setTimeout(() => {
-          this.resubscribeAllRealtime();
-        }, 100);
+        if (this.pb === pbInstance) this.realtimeAuthLifecycle?.requestReset();
       }
       return data;
     };
 
-    pbInstance.authStore.onChange(() => {
-      try {
-        pbInstance.cancelAllRequests();
-      } catch (e) {}
-      try {
-        pbInstance.realtime.unsubscribe().catch(() => {});
-      } catch (e) {}
-      // Automatically re-establish subscriptions with updated credentials
-      setTimeout(() => {
-        this.resubscribeAllRealtime();
-      }, 100);
-    });
   }
 
   public resubscribeAllRealtime() {
@@ -979,10 +968,14 @@ class PocketBaseService {
   }
 
   setServerUrl(url: string) {
+    if (url === this.serverUrl) return;
+    this.realtimeAuthLifecycle?.dispose();
+    void this.pb.realtime.unsubscribe().catch(() => {});
     this.serverUrl = url;
     localStorage.setItem('sirver_pb_url', url);
     this.pb = new PocketBase(url);
     this.initPbInstance(this.pb);
+    this.resubscribeAllRealtime();
   }
 
   getServerUrl(): string {

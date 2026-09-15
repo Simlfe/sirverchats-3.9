@@ -1,5 +1,11 @@
 # Sirver Application Changelog
 
+## [3.9-realtime-stability] - 2026-09-16
+- Keep the PocketBase realtime connection open when only the saved user record changes.
+- Serialize credential resets and stop cancelling unrelated reads during profile updates.
+- Dispose old authentication listeners when changing backend instances; coalesce reset bursts.
+- Add regression coverage for profile saves, token refresh, logout, and reset disposal.
+
 ## [3.9-performance-remediation] - 2026-09-15
 ### Cache-first startup, cursor history, and thumbnail-safe media
 - Added a compact last-session snapshot so cached servers, channels, DMs, drafts,
