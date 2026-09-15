@@ -27,6 +27,15 @@ class CallSignalingService {
   }
 
   public setCurrentUser(user: User | null) {
+    const previousUserId = this.currentUser?.id;
+    if (previousUserId && previousUserId !== user?.id) {
+      // Never carry a ringing/accepted event across logout or account
+      // changes. A late websocket packet must not resurrect the old call.
+      this.clearOutgoingSoundTimer();
+      this.clearTimeoutTimer();
+      stopAllRingtones();
+      this.activeCallEvent = null;
+    }
     this.currentUser = user;
   }
 
