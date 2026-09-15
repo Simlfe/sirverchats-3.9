@@ -25,6 +25,12 @@ export function compareMessageOrder(a: Pick<Message, 'created' | 'id'>, b: Pick<
   return String(a.id || '').localeCompare(String(b.id || ''));
 }
 
+function relationRichness(value: unknown): number {
+  if (!value || typeof value !== 'object') return 0;
+  return Object.values(value as Record<string, unknown>)
+    .filter((field) => field !== undefined && field !== null && field !== '').length;
+}
+
 /** Sort ascending for the React feed and remove duplicate optimistic/real ids. */
 export function dedupeMessages(messages: Message[], maxItems?: number): Message[] {
   const byId = new Map<string, Message>();
@@ -40,7 +46,7 @@ export function dedupeMessages(messages: Message[], maxItems?: number): Message[
     const incomingSender = message.expand?.sender || (message as any)?.sender && typeof (message as any).sender !== 'string';
     const existingAttachmentCount = ((existing as any)?.attachments || existing?.expand?.['attachments(message)'] || existing?.expand?.attachments_via_message || []).length;
     const incomingAttachmentCount = ((message as any)?.attachments || message.expand?.['attachments(message)'] || message.expand?.attachments_via_message || []).length;
-    const incomingIsRicher = Boolean(incomingSender && !existingSender) || incomingAttachmentCount > existingAttachmentCount || Boolean(message.reply_to && !existing?.reply_to);
+    const incomingIsRicher = relationRichness(incomingSender) > relationRichness(existingSender) || incomingAttachmentCount > existingAttachmentCount || Boolean(message.reply_to && !existing?.reply_to);
     const incomingIsNewer = Boolean(message.updated && existing?.updated && message.updated > existing.updated);
     if (!existing || (!message.is_pending && existing.is_pending) || (!message.is_pending && !existing?.is_pending && (incomingIsRicher || incomingIsNewer))) {
       byId.set(message.id, message);
